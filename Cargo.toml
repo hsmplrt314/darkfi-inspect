@@ -1,0 +1,18 @@
+[package]
+name = "darkfi-inspect"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+darkfi = { path = "../darkfi", features = ["blockchain", "util", "validator"] }
+darkfi-serial = { path = "../darkfi/src/serial"}
+
+[patch.crates-io]
+halo2_proofs = { git = "https://github.com/parazyd/halo2", branch = "v050" }
+halo2_gadgets = { git = "https://github.com/parazyd/halo2", branch = "v050" }
+url = { git = "https://github.com/darkrenaissance/rust-url", branch = "v258" }
