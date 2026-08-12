@@ -69,22 +69,27 @@ It does not attempt to decode arbitrary contract-specific calldata or claim that
 
 It combines individual checks into an overall verdict and surfaces actionable findings when a check fails or cannot be established.
 
+The following is a representative healthy live snapshot:
+
 ```text
 $ ./target/debug/darkfi-inspect diagnose
 
 DarkFi node diagnostic
 Diagnosis: HEALTHY
 
-chain: OK [CONFIRMED] last confirmed block: 44559 (...)
-best_fork: OK [CONFIRMED] best fork next height: 44565
-chain_depth: OK [CONFIRMED] confirmation depth is 5 blocks
-peers: OK [CONFIRMED] 3 peer(s) connected
-rpc: OK [CONFIRMED] RPC responsive (4 ms)
-eventgraph_parents: OK [CONFIRMED] 346 events, 324 non-null parent references, all parents resolved
-eventgraph_rotation: OK [CONFIRMED] 24 consecutive hourly rotation timestamps present
+  chain: OK [CONFIRMED] ...
+  best_fork: OK [CONFIRMED] ...
+  chain_depth: OK [CONFIRMED] ...
+  peers: OK [CONFIRMED] ...
+  rpc: OK [CONFIRMED] ...
+  eventgraph_parents: OK [CONFIRMED] ...
+  eventgraph_rotation: OK [CONFIRMED] ...
+  eventgraph_epoch: OK [CONFIRMED] ...
+  eventgraph_current: OK [CONFIRMED] latest genesis matches canonical current rotation ...
 
 No obvious issues detected.
-Summary: 7 passed, 0 failed, 0 unknown
+
+Summary: 9 passed, 0 failed, 0 unknown
 ```
 
 The diagnostic currently checks:
@@ -96,6 +101,8 @@ The diagnostic currently checks:
 * RPC responsiveness
 * EventGraph parent-reference closure
 * consecutive hourly EventGraph rotation periods
+* canonical DarkIRC EventGraph epoch alignment
+* current EventGraph rotation against wall-clock time
 
 The EventGraph checks use the existing DarkIRC `eventgraph.get_info` RPC. `darkfi-inspect` does not modify DarkFi itself; it consumes the information already exposed by the running service.
 
@@ -120,6 +127,29 @@ eventgraph_rotation: OK [CONFIRMED] 24 consecutive hourly rotation timestamps pr
 ```
 
 This is intended to catch a missing rotation period without requiring the developer to manually inspect the raw EventGraph response.
+
+The epoch check verifies that layer-0 genesis timestamps are aligned to the canonical DarkIRC EventGraph epoch: the configured genesis origin and hourly rotation boundaries.
+
+For a healthy live snapshot:
+
+```text
+eventgraph_epoch: OK [CONFIRMED] 25 genesis timestamps aligned to the canonical DarkIRC hourly epoch
+```
+
+The current-rotation check compares the latest layer-0 genesis timestamp in the snapshot against the rotation boundary implied by the current wall-clock time.
+
+For a healthy live snapshot:
+
+```text
+eventgraph_current: OK [CONFIRMED] latest genesis matches canonical current rotation 1786554000000
+```
+
+Together, these checks distinguish between different kinds of EventGraph problems:
+
+* **parent closure** — references in the returned DAG resolve correctly
+* **rotation continuity** — expected hourly rotation periods are present
+* **epoch alignment** — genesis timestamps follow the canonical DarkIRC epoch
+* **current rotation** — the latest observed genesis is aligned with the rotation that should currently be active
 
 ## JSON output
 
@@ -171,13 +201,25 @@ $ ./target/debug/darkfi-inspect --json diagnose
       "message": "24 consecutive hourly rotation timestamps present",
       "name": "eventgraph_rotation",
       "state": "Pass"
+    },
+    {
+      "confidence": "Confirmed",
+      "message": "25 genesis timestamps aligned to the canonical DarkIRC hourly epoch",
+      "name": "eventgraph_epoch",
+      "state": "Pass"
+    },
+    {
+      "confidence": "Confirmed",
+      "message": "latest genesis matches canonical current rotation 1786554000000",
+      "name": "eventgraph_current",
+      "state": "Pass"
     }
   ],
   "verdict": "HEALTHY",
   "findings": [],
   "summary": {
     "failed": 0,
-    "passed": 7,
+    "passed": 9,
     "unknown": 0
   }
 }
