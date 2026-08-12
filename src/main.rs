@@ -711,7 +711,9 @@ fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
 }
 
 async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
-    let start = std::time::Instant::now();
+    let rpc_start = std::time::Instant::now();
+    let ping_reply = rpc::call(RPC_ENDPOINT, "ping", Value::Array(vec![])).await;
+    let rpc_latency_ms = rpc_start.elapsed().as_millis();
 
     let lcb_reply = rpc::call(
         RPC_ENDPOINT,
@@ -728,8 +730,6 @@ async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
     .await;
 
     let p2p_reply = rpc::call(MGMT_ENDPOINT, "p2p.get_info", Value::Array(vec![])).await;
-
-    let rpc_latency_ms = start.elapsed().as_millis();
 
     let mut checks = Vec::new();
 
@@ -829,10 +829,16 @@ async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
         }
     }
 
-    checks.push(CheckResult::confirmed_pass(
-        "rpc",
-        &format!("RPC responsive ({} ms)", rpc_latency_ms),
-    ));
+    match ping_reply {
+        Ok(_) => checks.push(CheckResult::confirmed_pass(
+            "rpc",
+            &format!("RPC responsive ({} ms)", rpc_latency_ms),
+        )),
+        Err(e) => checks.push(CheckResult::confirmed_fail(
+            "rpc",
+            &format!("RPC failed: {e}"),
+        )),
+    }
 
     match rpc::get_eventgraph_info(DARKIRC_ENDPOINT).await {
         Ok(info) => {
