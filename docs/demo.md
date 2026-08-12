@@ -54,6 +54,7 @@ Function:  2
 Data:      534 byte(s)
 Parent:    None
 Children:  []
+tx_hash: OK [CONFIRMED] transaction hash matches the requested hash
 calls_proofs: OK [CONFIRMED] call count matches proof-group count (1)
 calls_signatures: OK [CONFIRMED] call count matches signature-group count (1)
 ```
@@ -85,11 +86,17 @@ $ ./target/debug/darkfi-inspect --json inspect tx 8daf70f08516698100048c2280a725
     }
   ],
   "summary": {
-    "passed": 2,
+    "passed": 3,
     "failed": 0,
     "unknown": 0
   },
   "checks": [
+    {
+      "name": "tx_hash",
+      "state": "Pass",
+      "confidence": "Confirmed",
+      "message": "transaction hash matches the requested hash"
+    },
     {
       "name": "calls_proofs",
       "state": "Pass",

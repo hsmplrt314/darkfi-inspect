@@ -266,6 +266,22 @@ fn check_block_height(requested_height: u32, block: &darkfi::blockchain::BlockIn
     }
 }
 
+fn check_tx_hash(requested_hash: &str, tx: &darkfi::tx::Transaction) -> CheckResult {
+    let actual_hash = tx.hash().to_string();
+
+    if requested_hash.eq_ignore_ascii_case(&actual_hash) {
+        CheckResult::confirmed_pass("tx_hash", "transaction hash matches the requested hash")
+    } else {
+        CheckResult::confirmed_fail(
+            "tx_hash",
+            &format!(
+                "transaction hash {} does not match requested {}",
+                actual_hash, requested_hash
+            ),
+        )
+    }
+}
+
 fn check_tx_proof_alignment(tx: &darkfi::tx::Transaction) -> CheckResult {
     if tx.calls.len() == tx.proofs.len() {
         CheckResult::confirmed_pass(
@@ -359,6 +375,7 @@ async fn cmd_inspect(target: InspectTarget, json: bool) -> anyhow::Result<()> {
             let actual_hash = tx.hash().to_string();
 
             let checks = vec![
+                check_tx_hash(&hash, &tx),
                 check_tx_proof_alignment(&tx),
                 check_tx_signature_alignment(&tx),
             ];
