@@ -1,7 +1,10 @@
 mod diagnose;
 mod rpc;
 
-use diagnose::{BlockInspection, CheckResult, CheckState, Confidence, DiagnosticSummary};
+use diagnose::{
+    BlockInspection, CheckResult, CheckState, Confidence, DiagnosticSummary, DiagnosticVerdict,
+    finding_for,
+};
 
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -847,21 +850,39 @@ async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
     }
 
     let summary = DiagnosticSummary::from_checks(&checks);
+    let verdict = DiagnosticVerdict::from_summary(&summary);
+
+    let findings: Vec<String> = checks.iter().filter_map(finding_for).collect();
 
     if json {
         println!(
             "{}",
-            serde_json::json!({
-                "summary": summary,
-                "checks": checks
-            })
+            serde_json::to_string_pretty(&serde_json::json!({
+                "verdict": verdict.as_str(),
+                                                            "findings": findings,
+                                                            "summary": summary,
+                                                            "checks": checks
+            }))?
         );
     } else {
         println!("DarkFi node diagnostic");
         println!();
+        println!("Diagnosis: {}", verdict.as_str());
+        println!();
 
         for check in &checks {
             check.print_human();
+        }
+
+        println!();
+
+        if findings.is_empty() {
+            println!("No obvious issues detected.");
+        } else {
+            println!("Findings:");
+            for finding in &findings {
+                println!("  - {}", finding);
+            }
         }
 
         println!();

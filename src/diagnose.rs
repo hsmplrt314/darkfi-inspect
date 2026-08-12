@@ -142,3 +142,51 @@ impl DiagnosticSummary {
         }
     }
 }
+
+#[derive(Debug, Serialize)]
+pub enum DiagnosticVerdict {
+    Healthy,
+    Attention,
+    Failed,
+}
+
+impl DiagnosticVerdict {
+    pub fn from_summary(summary: &DiagnosticSummary) -> Self {
+        if summary.failed > 0 {
+            Self::Failed
+        } else if summary.unknown > 0 {
+            Self::Attention
+        } else {
+            Self::Healthy
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Healthy => "HEALTHY",
+            Self::Attention => "ATTENTION",
+            Self::Failed => "FAILED",
+        }
+    }
+}
+
+/// Turn failed/unknown checks into a useful next place to investigate.
+pub fn finding_for(check: &CheckResult) -> Option<String> {
+    let area = match check.name.as_str() {
+        "chain" => "blockchain/chain state",
+        "best_fork" => "consensus/fork state",
+        "chain_depth" => "consensus/synchronization",
+        "peers" => "P2P connectivity",
+        "rpc" => "RPC responsiveness",
+        "eventgraph_parents" => "DarkIRC/EventGraph synchronization",
+        "eventgraph_rotation" => "DarkIRC/EventGraph rotation history",
+        "eventgraph" => "DarkIRC EventGraph RPC",
+        _ => return None,
+    };
+
+    match check.state {
+        CheckState::Pass => None,
+        CheckState::Fail => Some(format!("{}: {}", area, check.message)),
+        CheckState::Unknown => Some(format!("{}: {}", area, check.message)),
+    }
+}
