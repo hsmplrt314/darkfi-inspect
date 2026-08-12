@@ -190,3 +190,58 @@ pub fn finding_for(check: &CheckResult) -> Option<String> {
         CheckState::Unknown => Some(format!("{}: {}", area, check.message)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verdict_is_healthy_when_all_checks_pass() {
+        let checks = vec![CheckResult::confirmed_pass("test", "everything is fine")];
+        let summary = DiagnosticSummary::from_checks(&checks);
+
+        assert!(matches!(
+            DiagnosticVerdict::from_summary(&summary),
+            DiagnosticVerdict::Healthy
+        ));
+    }
+
+    #[test]
+    fn verdict_is_attention_when_check_is_unknown() {
+        let checks = vec![CheckResult::unknown("test", "could not determine state")];
+        let summary = DiagnosticSummary::from_checks(&checks);
+
+        assert!(matches!(
+            DiagnosticVerdict::from_summary(&summary),
+            DiagnosticVerdict::Attention
+        ));
+    }
+
+    #[test]
+    fn verdict_is_failed_when_check_fails() {
+        let checks = vec![CheckResult::confirmed_fail("test", "something is wrong")];
+        let summary = DiagnosticSummary::from_checks(&checks);
+
+        assert!(matches!(
+            DiagnosticVerdict::from_summary(&summary),
+            DiagnosticVerdict::Failed
+        ));
+    }
+
+    #[test]
+    fn failed_check_produces_finding() {
+        let check = CheckResult::confirmed_fail("peers", "no connected peers");
+
+        let finding = finding_for(&check);
+
+        assert!(finding.is_some());
+        assert!(finding.unwrap().contains("P2P connectivity"));
+    }
+
+    #[test]
+    fn passed_check_produces_no_finding() {
+        let check = CheckResult::confirmed_pass("peers", "3 peer(s) connected");
+
+        assert!(finding_for(&check).is_none());
+    }
+}
