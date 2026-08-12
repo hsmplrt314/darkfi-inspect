@@ -156,6 +156,14 @@ pub async fn get_tx(endpoint: &str, hash: &str) -> anyhow::Result<Transaction> {
     Ok(tx)
 }
 
+// Fetches the current EventGraph snapshot from DarkIRC.
+// The existing DarkIRC RPC returns:
+// {"eventgraph_info": {"dag": {"event-id": event, ...}}}
+pub async fn get_eventgraph_info(endpoint: &str) -> anyhow::Result<Value> {
+    let result = call(endpoint, "eventgraph.get_info", serde_json::json!([])).await?;
+    Ok(result)
+}
+
 // Fetches darkfid's currently configured block target time (seconds),
 // used as the baseline for judging whether a real timestamp gap looks
 // plausible or not.

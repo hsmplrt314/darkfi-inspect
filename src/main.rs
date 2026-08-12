@@ -11,6 +11,7 @@ use serde_json::Value;
 // Later these become configurable (network selection, custom endpoint).
 const RPC_ENDPOINT: &str = "127.0.0.1:18345";
 const MGMT_ENDPOINT: &str = "127.0.0.1:18346";
+const DARKIRC_ENDPOINT: &str = "127.0.0.1:9605";
 
 // This is the *specific* shape of p2p.get_info's result, matching
 // exactly what we read in src/rpc/p2p_method.rs — a list of channels
@@ -94,6 +95,8 @@ enum Command {
     Status,
     /// Subscribe to live node events (blocks, txs, proposals)
     Events,
+    /// Run a quick diagnostic of the node
+    Diagnose,
     /// Inspect a specific object by height or hash
     Inspect {
         #[command(subcommand)]
@@ -125,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Status => cmd_status(cli.json).await?,
         Command::Events => cmd_events().await?,
         Command::Inspect { target } => cmd_inspect(target, cli.json).await?,
+        Command::Diagnose => cmd_diagnose(cli.json).await?,
     }
 
     Ok(())
@@ -528,4 +532,348 @@ async fn check_timestamp_sanity(
             ),
         )
     }
+}
+
+fn check_confirmation_depth(last_confirmed_height: u32, best_fork_next_height: u32) -> CheckResult {
+    if best_fork_next_height <= last_confirmed_height {
+        return CheckResult::new(
+            "chain_depth",
+            CheckState::Fail,
+            Confidence::High,
+            &format!(
+                "best fork next height {} is not ahead of last confirmed height {}",
+                best_fork_next_height, last_confirmed_height
+            ),
+        );
+    }
+
+    let depth = (best_fork_next_height - last_confirmed_height - 1) as i64;
+
+    if depth == 5 {
+        CheckResult::confirmed_pass("chain_depth", "confirmation depth is 5 blocks")
+    } else {
+        CheckResult::new(
+            "chain_depth",
+            CheckState::Fail,
+            Confidence::Medium,
+            &format!(
+                "confirmation depth is {} blocks (observed healthy value: 5)",
+                depth
+            ),
+        )
+    }
+}
+
+fn check_eventgraph_parent_closure(info: &Value) -> CheckResult {
+    const NULL_ID: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    let Some(dag) = info
+        .get("eventgraph_info")
+        .and_then(|v| v.get("dag"))
+        .and_then(Value::as_object)
+    else {
+        return CheckResult::unknown(
+            "eventgraph_parents",
+            "EventGraph response did not contain eventgraph_info.dag",
+        );
+    };
+
+    let event_count = dag.len();
+    let mut parent_refs = 0usize;
+    let mut missing_parents = Vec::new();
+
+    for event in dag.values() {
+        let Some(parents) = event.get("parents").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for parent in parents {
+            let Some(parent_id) = parent.as_str() else {
+                continue;
+            };
+
+            if parent_id == NULL_ID {
+                continue;
+            }
+
+            parent_refs += 1;
+
+            if !dag.contains_key(parent_id) {
+                missing_parents.push(parent_id.to_string());
+            }
+        }
+    }
+
+    if missing_parents.is_empty() {
+        CheckResult::confirmed_pass(
+            "eventgraph_parents",
+            &format!(
+                "{} events, {} non-null parent references, all parents resolved",
+                event_count, parent_refs
+            ),
+        )
+    } else {
+        CheckResult::new(
+            "eventgraph_parents",
+            CheckState::Fail,
+            Confidence::Medium,
+            &format!(
+                "{} events, {} non-null parent references, {} missing parent reference(s)",
+                event_count,
+                parent_refs,
+                missing_parents.len()
+            ),
+        )
+    }
+}
+
+fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
+    const HOUR_MS: u64 = 60 * 60 * 1000;
+    const EXPECTED_ROTATIONS: usize = 24;
+
+    let Some(dag) = info
+        .get("eventgraph_info")
+        .and_then(|v| v.get("dag"))
+        .and_then(Value::as_object)
+    else {
+        return CheckResult::unknown(
+            "eventgraph_rotation",
+            "EventGraph response did not contain eventgraph_info.dag",
+        );
+    };
+
+    let mut genesis_timestamps = Vec::new();
+
+    for event in dag.values() {
+        let Some(layer) = event.get("layer").and_then(Value::as_u64) else {
+            continue;
+        };
+
+        if layer != 0 {
+            continue;
+        }
+
+        let Some(timestamp) = event.get("timestamp").and_then(Value::as_u64) else {
+            continue;
+        };
+
+        genesis_timestamps.push(timestamp);
+    }
+
+    if genesis_timestamps.len() < EXPECTED_ROTATIONS {
+        return CheckResult::new(
+            "eventgraph_rotation",
+            CheckState::Fail,
+            Confidence::High,
+            &format!(
+                "only {} genesis timestamps found; expected at least {} rotating DAGs",
+                genesis_timestamps.len(),
+                EXPECTED_ROTATIONS
+            ),
+        );
+    }
+
+    let latest = *genesis_timestamps.iter().max().unwrap();
+
+    let mut missing = Vec::new();
+
+    for offset in 0..EXPECTED_ROTATIONS {
+        let expected = latest.saturating_sub(offset as u64 * HOUR_MS);
+
+        if !genesis_timestamps.contains(&expected) {
+            missing.push(expected);
+        }
+    }
+
+    if missing.is_empty() {
+        CheckResult::confirmed_pass(
+            "eventgraph_rotation",
+            &format!(
+                "{} consecutive hourly rotation timestamps present",
+                EXPECTED_ROTATIONS
+            ),
+        )
+    } else {
+        CheckResult::new(
+            "eventgraph_rotation",
+            CheckState::Fail,
+            Confidence::High,
+            &format!(
+                "missing {} rotation timestamp(s) in the latest {}-hour window",
+                missing.len(),
+                EXPECTED_ROTATIONS
+            ),
+        )
+    }
+}
+
+async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
+    let start = std::time::Instant::now();
+
+    let lcb_reply = rpc::call(
+        RPC_ENDPOINT,
+        "blockchain.last_confirmed_block",
+        Value::Array(vec![]),
+    )
+    .await;
+
+    let bfh_reply = rpc::call(
+        RPC_ENDPOINT,
+        "blockchain.best_fork_next_block_height",
+        Value::Array(vec![]),
+    )
+    .await;
+
+    let p2p_reply = rpc::call(MGMT_ENDPOINT, "p2p.get_info", Value::Array(vec![])).await;
+
+    let rpc_latency_ms = start.elapsed().as_millis();
+
+    let mut checks = Vec::new();
+
+    let last_confirmed = match lcb_reply {
+        Ok(reply) => match serde_json::from_value::<(u32, String)>(reply) {
+            Ok((height, hash)) => {
+                checks.push(CheckResult::confirmed_pass(
+                    "chain",
+                    &format!("last confirmed block: {} ({})", height, hash),
+                ));
+                Some((height, hash))
+            }
+            Err(e) => {
+                checks.push(CheckResult::confirmed_fail(
+                    "chain",
+                    &format!("invalid last confirmed block response: {e}"),
+                ));
+                None
+            }
+        },
+        Err(e) => {
+            checks.push(CheckResult::confirmed_fail(
+                "chain",
+                &format!("blockchain RPC failed: {e}"),
+            ));
+            None
+        }
+    };
+
+    let best_fork_next = match bfh_reply {
+        Ok(reply) => match serde_json::from_value::<u32>(reply) {
+            Ok(height) => {
+                checks.push(CheckResult::confirmed_pass(
+                    "best_fork",
+                    &format!("best fork next height: {height}"),
+                ));
+                Some(height)
+            }
+            Err(e) => {
+                checks.push(CheckResult::confirmed_fail(
+                    "best_fork",
+                    &format!("invalid best fork response: {e}"),
+                ));
+                None
+            }
+        },
+        Err(e) => {
+            checks.push(CheckResult::confirmed_fail(
+                "best_fork",
+                &format!("best fork RPC failed: {e}"),
+            ));
+            None
+        }
+    };
+
+    match (last_confirmed.as_ref(), best_fork_next) {
+        (Some((last_height, _)), Some(next_height)) => {
+            checks.push(check_confirmation_depth(*last_height, next_height));
+        }
+        _ => {
+            checks.push(CheckResult::unknown(
+                "chain_depth",
+                "could not determine confirmation depth",
+            ));
+        }
+    }
+
+    match p2p_reply {
+        Ok(reply) => match serde_json::from_value::<P2pInfo>(reply) {
+            Ok(info) => {
+                if info.channels.is_empty() {
+                    checks.push(CheckResult::new(
+                        "peers",
+                        CheckState::Fail,
+                        Confidence::High,
+                        "no connected peers",
+                    ));
+                } else {
+                    checks.push(CheckResult::confirmed_pass(
+                        "peers",
+                        &format!("{} peer(s) connected", info.channels.len()),
+                    ));
+                }
+            }
+            Err(e) => {
+                checks.push(CheckResult::confirmed_fail(
+                    "peers",
+                    &format!("invalid p2p response: {e}"),
+                ));
+            }
+        },
+        Err(e) => {
+            checks.push(CheckResult::confirmed_fail(
+                "peers",
+                &format!("p2p RPC failed: {e}"),
+            ));
+        }
+    }
+
+    checks.push(CheckResult::confirmed_pass(
+        "rpc",
+        &format!("RPC responsive ({} ms)", rpc_latency_ms),
+    ));
+
+    match rpc::get_eventgraph_info(DARKIRC_ENDPOINT).await {
+        Ok(info) => {
+            checks.push(check_eventgraph_parent_closure(&info));
+            checks.push(check_eventgraph_rotation_window(&info));
+        }
+        Err(e) => {
+            checks.push(CheckResult::new(
+                "eventgraph",
+                CheckState::Fail,
+                Confidence::High,
+                &format!("DarkIRC EventGraph RPC failed: {e}"),
+            ));
+        }
+    }
+
+    let summary = DiagnosticSummary::from_checks(&checks);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "summary": summary,
+                "checks": checks
+            })
+        );
+    } else {
+        println!("DarkFi node diagnostic");
+        println!();
+
+        for check in &checks {
+            check.print_human();
+        }
+
+        println!();
+        println!(
+            "Summary: {} passed, {} failed, {} unknown",
+            summary.passed, summary.failed, summary.unknown
+        );
+    }
+
+    if summary.failed > 0 {
+        std::process::exit(1);
+    }
+
+    Ok(())
 }
