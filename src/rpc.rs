@@ -1,4 +1,6 @@
-use darkfi::{blockchain::BlockInfo, util::encoding::base64, validator::consensus::Proposal};
+use darkfi::{
+    blockchain::BlockInfo, tx::Transaction, util::encoding::base64, validator::consensus::Proposal,
+};
 use darkfi_serial::deserialize_async;
 use serde::Serialize;
 use serde_json::Value;
@@ -135,6 +137,23 @@ pub async fn get_block(endpoint: &str, height: u32) -> anyhow::Result<BlockInfo>
         .ok_or_else(|| anyhow::anyhow!("failed to base64-decode block payload"))?;
     let block: BlockInfo = deserialize_async(&bytes).await?;
     Ok(block)
+}
+
+// Fetches a single transaction by its canonical hash via blockchain.get_tx
+// and decodes the base64 result into DarkFi's real Transaction type.
+pub async fn get_tx(endpoint: &str, hash: &str) -> anyhow::Result<Transaction> {
+    let result = call(endpoint, "blockchain.get_tx", serde_json::json!([hash])).await?;
+
+    let b64 = result
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("expected string result, got: {result}"))?;
+
+    let bytes = base64::decode(b64)
+        .ok_or_else(|| anyhow::anyhow!("failed to base64-decode transaction payload"))?;
+
+    let tx: Transaction = deserialize_async(&bytes).await?;
+
+    Ok(tx)
 }
 
 // Fetches darkfid's currently configured block target time (seconds),

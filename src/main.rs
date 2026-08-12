@@ -48,6 +48,27 @@ struct NodeStatus {
     rpc_latency_ms: u128,
 }
 
+#[derive(Debug, Serialize)]
+struct TxCallInspection {
+    index: usize,
+    contract_id: String,
+    function_code: Option<u8>,
+    data_length: usize,
+    parent: Option<usize>,
+    children: Vec<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct TxInspection {
+    hash: String,
+    calls: usize,
+    proofs: usize,
+    signatures: usize,
+    call_details: Vec<TxCallInspection>,
+    summary: DiagnosticSummary,
+    checks: Vec<CheckResult>,
+}
+
 // #[derive(Parser)] turns this struct into the whole CLI definition.
 // `about` becomes the text shown in `--help`.
 #[derive(Parser)]
@@ -86,6 +107,8 @@ enum Command {
 enum InspectTarget {
     /// Inspect a block by height
     Block { height: u32 },
+    /// Inspect a transaction by hash
+    Tx { hash: String },
 }
 
 // #[tokio::main] turns `main` into an async function tokio can drive.
@@ -243,6 +266,45 @@ fn check_block_height(requested_height: u32, block: &darkfi::blockchain::BlockIn
     }
 }
 
+fn check_tx_proof_alignment(tx: &darkfi::tx::Transaction) -> CheckResult {
+    if tx.calls.len() == tx.proofs.len() {
+        CheckResult::confirmed_pass(
+            "calls_proofs",
+            &format!("call count matches proof-group count ({})", tx.calls.len()),
+        )
+    } else {
+        CheckResult::confirmed_fail(
+            "calls_proofs",
+            &format!(
+                "call count {} does not match proof-group count {}",
+                tx.calls.len(),
+                tx.proofs.len()
+            ),
+        )
+    }
+}
+
+fn check_tx_signature_alignment(tx: &darkfi::tx::Transaction) -> CheckResult {
+    if tx.calls.len() == tx.signatures.len() {
+        CheckResult::confirmed_pass(
+            "calls_signatures",
+            &format!(
+                "call count matches signature-group count ({})",
+                tx.calls.len()
+            ),
+        )
+    } else {
+        CheckResult::confirmed_fail(
+            "calls_signatures",
+            &format!(
+                "call count {} does not match signature-group count {}",
+                tx.calls.len(),
+                tx.signatures.len()
+            ),
+        )
+    }
+}
+
 async fn cmd_inspect(target: InspectTarget, json: bool) -> anyhow::Result<()> {
     match target {
         InspectTarget::Block { height } => {
@@ -284,6 +346,69 @@ async fn cmd_inspect(target: InspectTarget, json: bool) -> anyhow::Result<()> {
                 println!("  Hash:     {}", inspection.hash);
                 println!("  Previous: {}", inspection.previous);
                 println!("  Txs:      {}", inspection.txs);
+
+                for check in &inspection.checks {
+                    check.print_human();
+                }
+            }
+        }
+
+        InspectTarget::Tx { hash } => {
+            let tx = rpc::get_tx(RPC_ENDPOINT, &hash).await?;
+
+            let actual_hash = tx.hash().to_string();
+
+            let checks = vec![
+                check_tx_proof_alignment(&tx),
+                check_tx_signature_alignment(&tx),
+            ];
+
+            let call_details = tx
+                .calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| TxCallInspection {
+                    index,
+                    contract_id: call.data.contract_id.to_string(),
+                    function_code: call.data.data.first().copied(),
+                    data_length: call.data.data.len(),
+                    parent: call.parent_index,
+                    children: call.children_indexes.clone(),
+                })
+                .collect();
+
+            let inspection = TxInspection {
+                hash: actual_hash,
+                calls: tx.calls.len(),
+                proofs: tx.proofs.len(),
+                signatures: tx.signatures.len(),
+                call_details,
+                summary: DiagnosticSummary::from_checks(&checks),
+                checks,
+            };
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&inspection)?);
+            } else {
+                println!("Transaction {}", inspection.hash);
+                println!("  Calls:      {}", inspection.calls);
+                println!("  Proof sets: {}", inspection.proofs);
+                println!("  Sig sets:   {}", inspection.signatures);
+
+                for call in &inspection.call_details {
+                    println!("  Call {}", call.index);
+                    println!("    Contract:  {}", call.contract_id);
+
+                    if let Some(code) = call.function_code {
+                        println!("    Function:  {}", code);
+                    } else {
+                        println!("    Function:  <none>");
+                    }
+
+                    println!("    Data:      {} byte(s)", call.data_length);
+                    println!("    Parent:    {:?}", call.parent);
+                    println!("    Children:  {:?}", call.children);
+                }
 
                 for check in &inspection.checks {
                     check.print_human();
