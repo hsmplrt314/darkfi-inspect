@@ -9,6 +9,7 @@ use diagnose::{
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // The main RPC port and management RPC port, as fixed constants for now.
 // Later these become configurable (network selection, custom endpoint).
@@ -710,6 +711,152 @@ fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
     }
 }
 
+fn check_eventgraph_epoch(info: &Value) -> CheckResult {
+    const DARKIRC_INITIAL_GENESIS: u64 = 1_740_787_200_000;
+    const HOUR_MS: u64 = 60 * 60 * 1000;
+
+    let Some(dag) = info
+        .get("eventgraph_info")
+        .and_then(|v| v.get("dag"))
+        .and_then(Value::as_object)
+    else {
+        return CheckResult::unknown(
+            "eventgraph_epoch",
+            "EventGraph response did not contain eventgraph_info.dag",
+        );
+    };
+
+    let mut genesis_timestamps = Vec::new();
+
+    for event in dag.values() {
+        let Some(layer) = event.get("layer").and_then(Value::as_u64) else {
+            continue;
+        };
+
+        if layer != 0 {
+            continue;
+        }
+
+        let Some(timestamp) = event.get("timestamp").and_then(Value::as_u64) else {
+            continue;
+        };
+
+        genesis_timestamps.push(timestamp);
+    }
+
+    if genesis_timestamps.is_empty() {
+        return CheckResult::unknown("eventgraph_epoch", "no layer-0 genesis timestamps found");
+    }
+
+    let mut invalid = Vec::new();
+
+    for timestamp in &genesis_timestamps {
+        if *timestamp < DARKIRC_INITIAL_GENESIS
+            || (*timestamp - DARKIRC_INITIAL_GENESIS) % HOUR_MS != 0
+        {
+            invalid.push(*timestamp);
+        }
+    }
+
+    if invalid.is_empty() {
+        CheckResult::confirmed_pass(
+            "eventgraph_epoch",
+            &format!(
+                "{} genesis timestamps aligned to the canonical DarkIRC hourly epoch",
+                genesis_timestamps.len()
+            ),
+        )
+    } else {
+        CheckResult::new(
+            "eventgraph_epoch",
+            CheckState::Fail,
+            Confidence::High,
+            &format!(
+                "{} of {} genesis timestamps are outside the canonical DarkIRC hourly epoch",
+                invalid.len(),
+                genesis_timestamps.len()
+            ),
+        )
+    }
+}
+
+fn check_eventgraph_current(info: &Value) -> CheckResult {
+    const DARKIRC_INITIAL_GENESIS: u64 = 1_740_787_200_000;
+    const HOUR_MS: u64 = 60 * 60 * 1000;
+
+    let Some(dag) = info
+        .get("eventgraph_info")
+        .and_then(|v| v.get("dag"))
+        .and_then(Value::as_object)
+    else {
+        return CheckResult::unknown(
+            "eventgraph_current",
+            "EventGraph response did not contain eventgraph_info.dag",
+        );
+    };
+
+    let Some(latest) = dag
+        .values()
+        .filter_map(|event| {
+            let layer = event.get("layer").and_then(Value::as_u64)?;
+            if layer != 0 {
+                return None;
+            }
+
+            event.get("timestamp").and_then(Value::as_u64)
+        })
+        .max()
+    else {
+        return CheckResult::unknown("eventgraph_current", "no layer-0 genesis timestamps found");
+    };
+
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as u64,
+        Err(_) => {
+            return CheckResult::unknown(
+                "eventgraph_current",
+                "system clock is before the Unix epoch",
+            );
+        }
+    };
+
+    let expected = if now < DARKIRC_INITIAL_GENESIS {
+        DARKIRC_INITIAL_GENESIS
+    } else {
+        let elapsed = now - DARKIRC_INITIAL_GENESIS;
+        let hours = elapsed / HOUR_MS;
+        DARKIRC_INITIAL_GENESIS + hours * HOUR_MS
+    };
+
+    if latest > expected {
+        return CheckResult::new(
+            "eventgraph_current",
+            CheckState::Fail,
+            Confidence::High,
+            &format!(
+                "latest genesis {} is ahead of canonical current rotation {}",
+                latest, expected
+            ),
+        );
+    }
+
+    let lag_hours = (expected - latest) / HOUR_MS;
+
+    let message = if lag_hours == 0 {
+        format!(
+            "latest genesis matches canonical current rotation {}",
+            expected
+        )
+    } else {
+        format!(
+            "latest genesis is {} rotation(s) behind canonical current rotation {}",
+            lag_hours, expected
+        )
+    };
+
+    CheckResult::confirmed_pass("eventgraph_current", &message)
+}
+
 async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
     let rpc_start = std::time::Instant::now();
     let ping_reply = rpc::call(RPC_ENDPOINT, "ping", Value::Array(vec![])).await;
@@ -844,6 +991,8 @@ async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
         Ok(info) => {
             checks.push(check_eventgraph_parent_closure(&info));
             checks.push(check_eventgraph_rotation_window(&info));
+            checks.push(check_eventgraph_epoch(&info));
+            checks.push(check_eventgraph_current(&info));
         }
         Err(e) => {
             checks.push(CheckResult::new(
