@@ -67,17 +67,23 @@ It does not attempt to decode arbitrary contract-specific calldata or claim that
 
 `diagnose` combines information from multiple DarkFi services into one diagnostic snapshot instead of requiring the developer to query each subsystem separately.
 
+It combines individual checks into an overall verdict and surfaces actionable findings when a check fails or cannot be established.
+
 ```text
 $ ./target/debug/darkfi-inspect diagnose
 
 DarkFi node diagnostic
-chain: OK [CONFIRMED] last confirmed block: 44559 (6a040708a5a6e30d24170613e928241e98262b9fd6ad8c9ab889a367f4f6a09c)
+Diagnosis: HEALTHY
+
+chain: OK [CONFIRMED] last confirmed block: 44559 (...)
 best_fork: OK [CONFIRMED] best fork next height: 44565
 chain_depth: OK [CONFIRMED] confirmation depth is 5 blocks
 peers: OK [CONFIRMED] 3 peer(s) connected
 rpc: OK [CONFIRMED] RPC responsive (4 ms)
 eventgraph_parents: OK [CONFIRMED] 346 events, 324 non-null parent references, all parents resolved
 eventgraph_rotation: OK [CONFIRMED] 24 consecutive hourly rotation timestamps present
+
+No obvious issues detected.
 Summary: 7 passed, 0 failed, 0 unknown
 ```
 
@@ -167,6 +173,8 @@ $ ./target/debug/darkfi-inspect --json diagnose
       "state": "Pass"
     }
   ],
+  "verdict": "HEALTHY",
+  "findings": [],
   "summary": {
     "failed": 0,
     "passed": 7,
@@ -176,6 +184,8 @@ $ ./target/debug/darkfi-inspect --json diagnose
 ```
 
 The JSON form is intended for scripts, monitoring, CI, and future tooling built on top of `darkfi-inspect`.
+
+`verdict` provides the overall diagnostic state, while `findings` contains higher-level descriptions of failed or unknown checks. When all checks pass, `findings` is empty.
 
 ## Current direction
 
