@@ -1,10 +1,10 @@
+use darkfi::{blockchain::BlockInfo, util::encoding::base64, validator::consensus::Proposal};
+use darkfi_serial::deserialize_async;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::time::{sleep, Duration};
-use darkfi::{blockchain::BlockInfo, util::encoding::base64, validator::consensus::Proposal};
-use darkfi_serial::deserialize_async;
+use tokio::time::{Duration, sleep};
 
 // Mirrors darkfi's JsonRequest struct (src/rpc/jsonrpc.rs) — same four
 // fields, same JSON-RPC 2.0 shape. #[derive(Serialize)] auto-generates
@@ -22,7 +22,12 @@ impl JsonRpcRequest {
     fn new(method: &str, params: Value) -> Self {
         // darkfi picks a random id for each request; a fixed id is fine
         // for now since we only ever send one request at a time.
-        Self { jsonrpc: "2.0", id: 1, method: method.to_string(), params }
+        Self {
+            jsonrpc: "2.0",
+            id: 1,
+            method: method.to_string(),
+            params,
+        }
     }
 }
 
@@ -54,7 +59,7 @@ async fn call_once(endpoint: &str, method: &str, params: Value) -> anyhow::Resul
 /// Public entry point — same signature as before, but now retries up to
 /// 3 times total (1 initial attempt + 2 retries) with a short delay
 /// between attempts, instead of failing on the very first hiccup.
-pub async fn call(endpoint: &str, method: &str, params:Value) -> anyhow::Result<Value> {
+pub async fn call(endpoint: &str, method: &str, params: Value) -> anyhow::Result<Value> {
     const MAX_ATTEMPTS: u32 = 3;
     const RETRY_DELAY: Duration = Duration::from_millis(500);
 
@@ -80,16 +85,16 @@ pub async fn call(endpoint: &str, method: &str, params:Value) -> anyhow::Result<
 // Shared first half: pull the base64 payload out of a notification and
 // decode it to raw bytes. Both BlockInfo and Proposal decoding start here.
 fn extract_payload_bytes(line: &str) -> Result<Vec<u8>, String> {
-    let parsed: Value =
-    serde_json::from_str(line).map_err(|e| format!("(failed to parse notification JSON: {e})"))?;
+    let parsed: Value = serde_json::from_str(line)
+        .map_err(|e| format!("(failed to parse notification JSON: {e})"))?;
     let params = parsed
-    .get("params")
-    .and_then(|p| p.as_array())
-    .ok_or_else(|| String::from("(no params array in notification)"))?;
+        .get("params")
+        .and_then(|p| p.as_array())
+        .ok_or_else(|| String::from("(no params array in notification)"))?;
     let b64 = params
-    .first()
-    .and_then(|p| p.as_str())
-    .ok_or_else(|| String::from("(no base64 payload in notification)"))?;
+        .first()
+        .and_then(|p| p.as_str())
+        .ok_or_else(|| String::from("(no base64 payload in notification)"))?;
     base64::decode(b64).ok_or_else(|| String::from("(failed to base64-decode payload)"))
 }
 
@@ -103,7 +108,42 @@ async fn decode_block_notification(line: &str) -> String {
         Ok(b) => b,
         Err(e) => return format!("(failed to deserialize BlockInfo: {e})"),
     };
-    format!("height={} hash={} txs={}", block.header.height, block.header.hash(), block.txs.len())
+    format!(
+        "height={} hash={} txs={}",
+        block.header.height,
+        block.header.hash(),
+        block.txs.len()
+    )
+}
+
+// Fetches a single block by height via blockchain.get_block and decodes
+// it into a real BlockInfo. Unlike the notification decoders, this comes
+// from call() (request/reply), not a pushed subscription — so the
+// payload is the raw base64 string directly in the result, not wrapped
+// in a "params" array.
+pub async fn get_block(endpoint: &str, height: u32) -> anyhow::Result<BlockInfo> {
+    let result = call(
+        endpoint,
+        "blockchain.get_block",
+        serde_json::json!([height]),
+    )
+    .await?;
+    let b64 = result
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("expected string result, got: {result}"))?;
+    let bytes = base64::decode(b64)
+        .ok_or_else(|| anyhow::anyhow!("failed to base64-decode block payload"))?;
+    let block: BlockInfo = deserialize_async(&bytes).await?;
+    Ok(block)
+}
+
+// Fetches darkfid's currently configured block target time (seconds),
+// used as the baseline for judging whether a real timestamp gap looks
+// plausible or not.
+pub async fn get_block_target(endpoint: &str) -> anyhow::Result<u64> {
+    let result = call(endpoint, "blockchain.block_target", serde_json::json!([])).await?;
+    let target = serde_json::from_value(result)?;
+    Ok(target)
 }
 
 // For subscribe_proposals: payload is Proposal { hash, block: BlockInfo },

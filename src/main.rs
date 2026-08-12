@@ -1,4 +1,7 @@
+mod diagnose;
 mod rpc;
+
+use diagnose::{BlockInspection, CheckResult, CheckState, Confidence, DiagnosticSummary};
 
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -70,6 +73,19 @@ enum Command {
     Status,
     /// Subscribe to live node events (blocks, txs, proposals)
     Events,
+    /// Inspect a specific object by height or hash
+    Inspect {
+        #[command(subcommand)]
+        target: InspectTarget,
+    },
+}
+
+// Separate enum for what kind of thing we're inspecting — clap nests this
+// as a subcommand of Inspect, e.g. `darkfi-inspect inspect block 43723`.
+#[derive(Subcommand)]
+enum InspectTarget {
+    /// Inspect a block by height
+    Block { height: u32 },
 }
 
 // #[tokio::main] turns `main` into an async function tokio can drive.
@@ -80,11 +96,12 @@ async fn main() -> anyhow::Result<()> {
     // invalid, clap prints a helpful error and exits — we never see it.
     let cli = Cli::parse();
 
-    match cli.command{
+    match cli.command {
         Command::Ping => cmd_ping(cli.json).await?,
         Command::Peers => cmd_peers(cli.json).await?,
         Command::Status => cmd_status(cli.json).await?,
         Command::Events => cmd_events().await?,
+        Command::Inspect { target } => cmd_inspect(target, cli.json).await?,
     }
 
     Ok(())
@@ -112,7 +129,11 @@ async fn cmd_peers(json: bool) -> anyhow::Result<()> {
         for ch in &info.channels {
             println!(" [{}] {} ({})", ch.id, ch.url, ch.session);
         }
-        println!("{} outbound slot(s): {:?}", info.outbound_slots.len(), info.outbound_slots);
+        println!(
+            "{} outbound slot(s): {:?}",
+            info.outbound_slots.len(),
+            info.outbound_slots
+        );
     }
     Ok(())
 }
@@ -122,8 +143,12 @@ async fn cmd_status(json: bool) -> anyhow::Result<()> {
 
     // blockchain.last_confirmed_block returns a raw 2-element array [height, hash],
     // so it deserializes straight into a tuple — no wrapper struct needed.
-    let lcb_reply =
-        rpc::call(RPC_ENDPOINT, "blockchain.last_confirmed_block", Value::Array(vec![])).await?;
+    let lcb_reply = rpc::call(
+        RPC_ENDPOINT,
+        "blockchain.last_confirmed_block",
+        Value::Array(vec![]),
+    )
+    .await?;
     let (last_confirmed_height, last_confirmed_hash): (u32, String) =
         serde_json::from_value(lcb_reply)?;
 
@@ -161,7 +186,10 @@ async fn cmd_status(json: bool) -> anyhow::Result<()> {
         );
         println!("Best fork next height: {}", status.best_fork_next_height);
         println!("Confirmation depth: {}", status.confirmation_depth);
-        println!("Peers: {}/{} connected", status.peers_connected, status.peers_slots);
+        println!(
+            "Peers: {}/{} connected",
+            status.peers_connected, status.peers_slots
+        );
         println!("RPC latency: {} ms", status.rpc_latency_ms);
     }
 
@@ -174,7 +202,6 @@ async fn cmd_status(json: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
-
 }
 
 async fn cmd_events() -> anyhow::Result<()> {
@@ -196,21 +223,167 @@ async fn cmd_events() -> anyhow::Result<()> {
     Ok(())
 }
 
+// Verify that the block returned by RPC actually reports the height we requested.
+// This protects the inspection layer from trusting an unexpected or mismatched
+// block response.
+fn check_block_height(requested_height: u32, block: &darkfi::blockchain::BlockInfo) -> CheckResult {
+    if block.header.height == requested_height {
+        CheckResult::confirmed_pass(
+            "block_height",
+            &format!("block reports requested height {}", requested_height),
+        )
+    } else {
+        CheckResult::confirmed_fail(
+            "block_height",
+            &format!(
+                "block reports height {}, requested {}",
+                block.header.height, requested_height
+            ),
+        )
+    }
+}
 
+async fn cmd_inspect(target: InspectTarget, json: bool) -> anyhow::Result<()> {
+    match target {
+        InspectTarget::Block { height } => {
+            let block = rpc::get_block(RPC_ENDPOINT, height).await?;
 
+            let height_check = check_block_height(height, &block);
 
+            // Fetch the previous block once — both chain_linkage and
+            // timestamp_sanity need it, no reason to fetch it twice.
+            let prev_block = if height == 0 {
+                None
+            } else {
+                rpc::get_block(RPC_ENDPOINT, height - 1).await.ok()
+            };
 
+            // Verify that this block correctly points to its predecessor.
+            let linkage_check = check_chain_linkage(height, &block, prev_block.as_ref());
 
+            // Check whether the timestamp gap from the predecessor is plausible.
+            let timestamp_check = check_timestamp_sanity(height, &block, prev_block.as_ref()).await;
 
+            // Keep the checks together so the same collection can feed both
+            // the inspection report and its diagnostic summary.
+            let checks = vec![height_check, linkage_check, timestamp_check];
 
+            let inspection = BlockInspection {
+                height: block.header.height,
+                hash: block.header.hash().to_string(),
+                previous: block.header.previous.to_string(),
+                txs: block.txs.len(),
+                summary: DiagnosticSummary::from_checks(&checks),
+                checks,
+            };
 
+            if json {
+                println!("{}", serde_json::to_string_pretty(&inspection)?);
+            } else {
+                println!("Block {}", inspection.height);
+                println!("  Hash:     {}", inspection.hash);
+                println!("  Previous: {}", inspection.previous);
+                println!("  Txs:      {}", inspection.txs);
 
+                for check in &inspection.checks {
+                    check.print_human();
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
+// Verify that a block points to the actual hash of its predecessor.
+// This is a strict structural check: if both blocks are available,
+// the result is either confirmed pass or confirmed failure.
+fn check_chain_linkage(
+    height: u32,
+    block: &darkfi::blockchain::BlockInfo,
+    prev_block: Option<&darkfi::blockchain::BlockInfo>,
+) -> CheckResult {
+    if height == 0 {
+        return CheckResult::unknown("chain_linkage", "N/A - genesis block has no predecessor");
+    }
 
+    match prev_block {
+        Some(prev) => {
+            let actual_prev_hash = prev.header.hash();
 
+            if actual_prev_hash == block.header.previous {
+                CheckResult::confirmed_pass(
+                    "chain_linkage",
+                    &format!("previous hash matches block {}", height - 1),
+                )
+            } else {
+                CheckResult::confirmed_fail(
+                    "chain_linkage",
+                    &format!(
+                        "previous hash does NOT match block {} - possible reorg or consensus anomaly",
+                        height - 1
+                    ),
+                )
+            }
+        }
 
+        None => CheckResult::unknown(
+            "chain_linkage",
+            &format!("could not fetch block {} to verify", height - 1),
+        ),
+    }
+}
 
+// Check whether the time gap between this block and its predecessor is
+// plausible relative to DarkFi's current block target.
+async fn check_timestamp_sanity(
+    height: u32,
+    block: &darkfi::blockchain::BlockInfo,
+    prev_block: Option<&darkfi::blockchain::BlockInfo>,
+) -> CheckResult {
+    if height == 0 {
+        return CheckResult::unknown("timestamp_sanity", "N/A — genesis block has no predecessor");
+    }
 
+    let Some(prev) = prev_block else {
+        return CheckResult::unknown(
+            "timestamp_sanity",
+            &format!("could not fetch block {} to verify", height - 1),
+        );
+    };
 
+    let gap = block.header.timestamp.inner() as i64 - prev.header.timestamp.inner() as i64;
 
+    let target = rpc::get_block_target(RPC_ENDPOINT).await.unwrap_or(120);
 
+    if gap < 0 {
+        CheckResult::new(
+            "timestamp_sanity",
+            CheckState::Fail,
+            Confidence::High,
+            &format!(
+                "timestamp is BEFORE block {} — possible clock drift or reorg",
+                height - 1
+            ),
+        )
+    } else if gap as u64 > target * 20 {
+        CheckResult::new(
+            "timestamp_sanity",
+            CheckState::Fail,
+            Confidence::Medium,
+            &format!(
+                "{gap}s gap since block {} is unusually large (target: {target}s)",
+                height - 1
+            ),
+        )
+    } else {
+        CheckResult::new(
+            "timestamp_sanity",
+            CheckState::Pass,
+            Confidence::Medium,
+            &format!(
+                "{gap}s since block {} — within plausible range (target: {target}s)",
+                height - 1
+            ),
+        )
+    }
+}
