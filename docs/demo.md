@@ -4,6 +4,45 @@
 
 The examples below are based on behavior tested against live DarkFi services.
 
+## Live DarkFi testnet
+
+The examples below are based on a live DarkFi testnet node with the following peers connected at the time of testing:
+
+```text
+Peer 1: tcp+tls://neo.not.org:18340/
+Peer 2: tcp+tls://node1.testnet.dark.fi:18340/
+Peer 3: tcp+tls://195.3.221.59:18340/
+Peer 4: tcp+tls://node0.testnet.dark.fi:18340/
+```
+The peer list is a snapshot from the time of testing and may change as nodes connect or disconnect.
+
+## CLI quick reference
+
+The main commands used with `darkfi-inspect` are:
+
+```text
+$ ./target/debug/darkfi-inspect ping
+$ ./target/debug/darkfi-inspect peers
+$ ./target/debug/darkfi-inspect status
+$ ./target/debug/darkfi-inspect events
+$ ./target/debug/darkfi-inspect diagnose
+$ ./target/debug/darkfi-inspect inspect block <HEIGHT>
+$ ./target/debug/darkfi-inspect inspect tx <TX_HASH>
+```
+Use `--json` with supported commands when structured output is needed:
+
+```text
+$ ./target/debug/darkfi-inspect --json diagnose
+$ ./target/debug/darkfi-inspect inspect --json block <HEIGHT>
+$ ./target/debug/darkfi-inspect inspect --json tx <TX_HASH>
+```
+
+For the complete command list:
+
+```text
+$ ./target/debug/darkfi-inspect --help
+```
+
 ## Inspect a healthy block
 
 ```text
