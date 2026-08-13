@@ -180,6 +180,8 @@ pub fn finding_for(check: &CheckResult) -> Option<String> {
         "rpc" => "RPC responsiveness",
         "eventgraph_parents" => "DarkIRC/EventGraph synchronization",
         "eventgraph_rotation" => "DarkIRC/EventGraph rotation history",
+        "eventgraph_epoch" => "DarkIRC/EventGraph epoch alignment",
+        "eventgraph_current" => "DarkIRC/EventGraph current rotation",
         "eventgraph" => "DarkIRC EventGraph RPC",
         _ => return None,
     };
@@ -243,5 +245,47 @@ mod tests {
         let check = CheckResult::confirmed_pass("peers", "3 peer(s) connected");
 
         assert!(finding_for(&check).is_none());
+    }
+
+    #[test]
+    fn failed_eventgraph_epoch_produces_finding() {
+        let check = CheckResult::confirmed_fail(
+            "eventgraph_epoch",
+            "2 of 24 genesis timestamps are outside the canonical DarkIRC hourly epoch",
+        );
+
+        let finding = finding_for(&check);
+
+        assert!(finding.is_some());
+        assert!(finding.unwrap().contains("DarkIRC/EventGraph epoch alignment"));
+    }
+
+    #[test]
+    fn failed_eventgraph_current_produces_finding() {
+        let check = CheckResult::confirmed_fail(
+            "eventgraph_current",
+            "latest genesis is ahead of canonical current rotation",
+        );
+
+        let finding = finding_for(&check);
+
+        assert!(finding.is_some());
+        assert!(finding.unwrap().contains("DarkIRC/EventGraph current rotation"));
+    }
+
+    #[test]
+    fn unknown_eventgraph_checks_produce_findings() {
+        let epoch = CheckResult::unknown(
+            "eventgraph_epoch",
+            "no layer-0 genesis timestamps found",
+        );
+
+        let current = CheckResult::unknown(
+            "eventgraph_current",
+            "no layer-0 genesis timestamps found",
+        );
+
+        assert!(finding_for(&epoch).is_some());
+        assert!(finding_for(&current).is_some());
     }
 }
