@@ -90,13 +90,13 @@ impl CheckResult {
     // "  chain_linkage: OK [CONFIRMED] previous hash matches block 43727"
     pub fn print_human(&self) {
         let verdict = match self.state {
-            CheckState::Pass => "OK",
-            CheckState::Fail => "MISMATCH",
+            CheckState::Pass => "PASS",
+            CheckState::Fail => "FAIL",
             CheckState::Unknown => "UNKNOWN",
         };
 
         println!(
-            "  {}: {} [{}] {}",
+            "  {:<20} [{}] [{}] {}",
             self.name, verdict, self.confidence, self.message
         );
     }

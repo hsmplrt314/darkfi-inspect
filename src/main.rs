@@ -987,9 +987,15 @@ async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
     let last_confirmed = match lcb_reply {
         Ok(reply) => match serde_json::from_value::<(u32, String)>(reply) {
             Ok((height, hash)) => {
+                let short_hash = if hash.len() > 16 {
+                    format!("{}...{}", &hash[..8], &hash[hash.len() - 8..])
+                } else {
+                    hash.clone()
+                };
+
                 checks.push(CheckResult::confirmed_pass(
                     "chain",
-                    &format!("last confirmed block: {} ({})", height, hash),
+                    &format!("last confirmed block: {} ({})", height, short_hash),
                 ));
                 Some((height, hash))
             }
