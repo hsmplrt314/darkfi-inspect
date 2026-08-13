@@ -182,6 +182,7 @@ pub fn finding_for(check: &CheckResult) -> Option<String> {
         "eventgraph_rotation" => "DarkIRC/EventGraph rotation history",
         "eventgraph_epoch" => "DarkIRC/EventGraph epoch alignment",
         "eventgraph_current" => "DarkIRC/EventGraph current rotation",
+        "eventgraph_genesis" => "DarkIRC/EventGraph genesis identity",
         "eventgraph" => "DarkIRC EventGraph RPC",
         _ => return None,
     };
@@ -287,5 +288,35 @@ mod tests {
 
         assert!(finding_for(&epoch).is_some());
         assert!(finding_for(&current).is_some());
+    }
+
+    #[test]
+    fn failed_eventgraph_genesis_produces_finding() {
+        let check = CheckResult::confirmed_fail(
+            "eventgraph_genesis",
+            "1 of 25 genesis ID(s) do not match the canonical DarkIRC genesis identity",
+        );
+
+        let finding = finding_for(&check);
+
+        assert!(finding.is_some());
+        assert!(finding
+        .unwrap()
+        .contains("DarkIRC/EventGraph genesis identity"));
+    }
+
+    #[test]
+    fn unknown_eventgraph_genesis_produces_finding() {
+        let check = CheckResult::unknown(
+            "eventgraph_genesis",
+            "no layer-0 genesis events found",
+        );
+
+        let finding = finding_for(&check);
+
+        assert!(finding.is_some());
+        assert!(finding
+        .unwrap()
+        .contains("DarkIRC/EventGraph genesis identity"));
     }
 }

@@ -86,10 +86,11 @@ Diagnosis: HEALTHY
   eventgraph_rotation: OK [CONFIRMED] ...
   eventgraph_epoch: OK [CONFIRMED] ...
   eventgraph_current: OK [CONFIRMED] latest genesis matches canonical current rotation ...
+  eventgraph_genesis: OK [CONFIRMED] 25 rotating genesis IDs match the canonical DarkIRC genesis identity ...
 
 No obvious issues detected.
 
-Summary: 9 passed, 0 failed, 0 unknown
+Summary: 10 passed, 0 failed, 0 unknown
 ```
 
 The diagnostic currently checks:
@@ -103,6 +104,7 @@ The diagnostic currently checks:
 * consecutive hourly EventGraph rotation periods
 * canonical DarkIRC EventGraph epoch alignment
 * current EventGraph rotation against wall-clock time
+* EventGraph genesis identity against the canonical DarkIRC construction
 
 The EventGraph checks use the existing DarkIRC `eventgraph.get_info` RPC. `darkfi-inspect` does not modify DarkFi itself; it consumes the information already exposed by the running service.
 
@@ -144,12 +146,23 @@ For a healthy live snapshot:
 eventgraph_current: OK [CONFIRMED] latest genesis matches canonical current rotation 1786554000000
 ```
 
+The genesis-identity check independently reconstructs the expected EventGraph genesis ID from the canonical DarkIRC genesis construction and compares it with the IDs returned by the node.
+
+For a healthy live snapshot:
+
+```text
+eventgraph_genesis: OK [CONFIRMED] 25 rotating genesis IDs match the canonical DarkIRC genesis identity
+```
+
+Together with the epoch check, this verifies not only that genesis timestamps are correctly aligned, but that the corresponding EventGraph IDs are consistent with the canonical DarkIRC identity construction.
+
 Together, these checks distinguish between different kinds of EventGraph problems:
 
 * **parent closure** — references in the returned DAG resolve correctly
 * **rotation continuity** — expected hourly rotation periods are present
 * **epoch alignment** — genesis timestamps follow the canonical DarkIRC epoch
 * **current rotation** — the latest observed genesis is aligned with the rotation that should currently be active
+* **genesis identity** — rotating genesis IDs match the canonical DarkIRC genesis construction
 
 ## JSON output
 
@@ -213,13 +226,19 @@ $ ./target/debug/darkfi-inspect --json diagnose
       "message": "latest genesis matches canonical current rotation 1786554000000",
       "name": "eventgraph_current",
       "state": "Pass"
+    },
+    {
+      "confidence": "Confirmed",
+      "message": "25 rotating genesis IDs match the canonical DarkIRC genesis identity",
+      "name": "eventgraph_genesis",
+      "state": "Pass"
     }
   ],
   "verdict": "HEALTHY",
   "findings": [],
   "summary": {
     "failed": 0,
-    "passed": 9,
+    "passed": 10,
     "unknown": 0
   }
 }

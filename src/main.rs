@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
+use darkfi_serial::serialize;
 
 // The main RPC port and management RPC port, as fixed constants for now.
 // Later these become configurable (network selection, custom endpoint).
@@ -631,6 +632,109 @@ fn check_eventgraph_parent_closure(info: &Value) -> CheckResult {
     }
 }
 
+fn canonical_eventgraph_genesis_id(timestamp: u64) -> String {
+    const DARKIRC_GENESIS_CONTENTS: &[u8] = b"darkirc-v1";
+    const N_EVENT_PARENTS: usize = 5;
+
+    let null_id = blake3::Hash::from_bytes([0u8; 32]);
+    let parents = [null_id; N_EVENT_PARENTS];
+    let content_hash = blake3::hash(DARKIRC_GENESIS_CONTENTS);
+
+    let mut hasher = blake3::Hasher::new();
+
+    let timestamp_bytes = serialize(&timestamp);
+    hasher.update(&timestamp_bytes);
+
+    let parents_bytes = serialize(&parents);
+    hasher.update(&parents_bytes);
+
+    let layer_bytes = serialize(&0u64);
+    hasher.update(&layer_bytes);
+
+    hasher.update(content_hash.as_bytes());
+
+    hasher.finalize().to_string()
+}
+
+fn check_eventgraph_genesis(info: &Value) -> CheckResult {
+    let Some(dag) = info
+    .get("eventgraph_info")
+    .and_then(|v| v.get("dag"))
+    .and_then(Value::as_object)
+    else {
+        return CheckResult::unknown(
+            "eventgraph_genesis",
+            "EventGraph response did not contain eventgraph_info.dag",
+        );
+    };
+
+    let mut genesis_count = 0usize;
+    let mut mismatches = Vec::new();
+
+    for (event_id, event) in dag {
+        let Some(layer) = event.get("layer").and_then(Value::as_u64) else {
+            continue;
+        };
+
+        if layer != 0 {
+            continue;
+        }
+
+        let Some(timestamp) = event.get("timestamp").and_then(Value::as_u64) else {
+            continue;
+        };
+
+        genesis_count += 1;
+
+        let expected_id = canonical_eventgraph_genesis_id(timestamp);
+
+        if !event_id.eq_ignore_ascii_case(&expected_id) {
+            mismatches.push((timestamp, event_id.clone(), expected_id));
+        }
+    }
+
+    if genesis_count == 0 {
+        return CheckResult::unknown(
+            "eventgraph_genesis",
+            "no layer-0 genesis events found",
+        );
+    }
+
+    if mismatches.is_empty() {
+        CheckResult::confirmed_pass(
+            "eventgraph_genesis",
+            &format!(
+                "{} rotating genesis IDs match the canonical DarkIRC genesis identity",
+                genesis_count
+            ),
+        )
+    } else {
+        CheckResult::new(
+            "eventgraph_genesis",
+            CheckState::Fail,
+            Confidence::Confirmed,
+            &format!(
+                "{} of {} genesis ID(s) do not match the canonical DarkIRC genesis identity",
+                     mismatches.len(),
+                     genesis_count
+            ),
+        )
+    }
+}
+
+#[cfg(test)]
+mod eventgraph_genesis_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_genesis_id_is_stable() {
+        let id = canonical_eventgraph_genesis_id(1_740_787_200_000);
+
+        assert_eq!(id.len(), 64);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}
+
 fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
     const HOUR_MS: u64 = 60 * 60 * 1000;
     const EXPECTED_ROTATIONS: usize = 24;
@@ -993,6 +1097,7 @@ async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
             checks.push(check_eventgraph_rotation_window(&info));
             checks.push(check_eventgraph_epoch(&info));
             checks.push(check_eventgraph_current(&info));
+            checks.push(check_eventgraph_genesis(&info));
         }
         Err(e) => {
             checks.push(CheckResult::new(
