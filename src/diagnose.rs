@@ -171,6 +171,9 @@ pub fn finding_for(check: &CheckResult) -> Option<String> {
     let area = match check.name.as_str() {
         "chain" => "blockchain/chain state",
         "best_fork" => "consensus/fork state",
+        "block_target" => "consensus block target",
+        "chain_tip" => "confirmed chain tip",
+        "chain_linkage" => "blockchain chain linkage",
         "chain_depth" => "consensus/synchronization",
         "peers" => "P2P connectivity",
         "rpc" => "RPC responsiveness",
