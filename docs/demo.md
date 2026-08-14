@@ -2,7 +2,7 @@
 
 `darkfi-inspect` is a developer-oriented CLI for observing, inspecting, and diagnosing DarkFi nodes and related network state.
 
-The examples below are based on behavior tested against live DarkFi services.
+The examples below are based on behavior tested against live DarkFi services. Live-state values such as heights, hashes, peer counts, and EventGraph counts are historical snapshots and may change.
 
 ## Live DarkFi testnet
 
@@ -53,12 +53,12 @@ Block 44424
   Previous: 916bb94d58fcb25a2fbb50d5d489399718b5518d6985e98996c94e077b41b2ef
   Txs:      1
 
-block_height: OK [CONFIRMED] block reports requested height 44424
-chain_linkage: OK [CONFIRMED] previous hash matches block 44423
-timestamp_sanity: OK [MEDIUM] 103s since block 44423 — within plausible range (target: 120s)
+  block_height         [PASS] [CONFIRMED] block reports requested height 44424
+  chain_linkage        [PASS] [CONFIRMED] previous hash matches block 44423
+  timestamp_sanity     [PASS] [CONFIRMED] timestamp satisfies DarkFi rules
 ```
 
-The block inspector verifies that the returned block matches the requested height, links to its predecessor, and has a timestamp gap within the current heuristic range.
+The block inspector verifies that the returned block matches the requested height, links to its predecessor, and applies the current DarkFi timestamp sanity rules.
 
 ## Inspect a suspicious block
 
@@ -70,11 +70,11 @@ Block 1
   Previous: 6612ed20b3cd85b5d5e0cf1f5f50c7cf9860853da36a0a306c19292e38fa6848
   Txs:      1
 
-chain_linkage: OK [CONFIRMED] previous hash matches block 0
-timestamp_sanity: MISMATCH [MEDIUM] 2645s gap since block 0 is unusually large (target: 120s)
+  chain_linkage        [PASS] [CONFIRMED] previous hash matches block 0
+  timestamp_sanity     [FAIL] [HIGH] timestamp violates the current DarkFi timestamp sanity rules
 ```
 
-The important distinction is that the tool reports the observation and its confidence instead of automatically presenting every anomaly as a proven consensus failure.
+The timestamp check applies DarkFi's current timestamp rules directly and reports the result with an explicit confidence level.
 
 ## Inspect a transaction
 
@@ -93,14 +93,14 @@ Transaction 8daf70f08516698100048c2280a7259f9b45a7c9c61938db0ceca3649d3668e9
     Data:      534 byte(s)
     Parent:    None
     Children:  []
-tx_hash: OK [CONFIRMED] transaction hash matches the requested hash
-calls_proofs: OK [CONFIRMED] call count matches proof-group count (1)
-calls_signatures: OK [CONFIRMED] call count matches signature-group count (1)
+  tx_hash              [PASS] [CONFIRMED] transaction hash matches the requested hash
+  call_tree            [PASS] [CONFIRMED] transaction call forest is structurally valid (1 call(s))
+  calls_proofs         [PASS] [CONFIRMED] call count matches proof-group count (1)
+  calls_signatures     [PASS] [CONFIRMED] call count matches signature-group count (1)
 ```
+The transaction inspector reports the real DarkFi `Transaction` returned by `blockchain.get_tx`, including call structure, proof/signature group counts, and DarkFi's canonical call-forest integrity check.
 
-The transaction inspector reports the real DarkFi `Transaction` returned by `blockchain.get_tx`, including call structure, proof/signature group counts, and structural consistency checks.
-
-It does not attempt to decode arbitrary contract-specific calldata or claim that ZK proofs or signatures are cryptographically valid without the additional verification context required by DarkFi.
+The `call_tree` check validates the serialized `DarkLeaf` forest structure using DarkFi's own `dark_forest_leaf_vec_integrity_check` implementation. The inspector does not attempt to decode arbitrary contract-specific calldata or claim that attached ZK proofs or signatures are cryptographically valid without the additional verification context required by DarkFi.
 
 ## Diagnose the node
 
@@ -116,25 +116,31 @@ $ ./target/debug/darkfi-inspect diagnose
 DarkFi node diagnostic
 Diagnosis: HEALTHY
 
-  chain: OK [CONFIRMED] ...
-  best_fork: OK [CONFIRMED] ...
-  chain_depth: OK [CONFIRMED] ...
-  peers: OK [CONFIRMED] ...
-  rpc: OK [CONFIRMED] ...
-  eventgraph_parents: OK [CONFIRMED] ...
-  eventgraph_rotation: OK [CONFIRMED] ...
-  eventgraph_epoch: OK [CONFIRMED] ...
-  eventgraph_current: OK [CONFIRMED] latest genesis matches canonical current rotation ...
-  eventgraph_genesis: OK [CONFIRMED] 25 rotating genesis IDs match the canonical DarkIRC genesis identity ...
+  block_target         [PASS] [CONFIRMED] consensus block target: 120
+  chain                [PASS] [CONFIRMED] last confirmed block: 45757 (09104206...57fef244)
+  chain_tip            [PASS] [CONFIRMED] last confirmed block 45757 matches fetched block hash
+  chain_linkage        [PASS] [CONFIRMED] previous hash matches block 45756
+  best_fork            [PASS] [CONFIRMED] best fork next height: 45763
+  chain_depth          [PASS] [CONFIRMED] confirmation depth is 5 blocks
+  peers                [PASS] [CONFIRMED] 3 peer(s) connected
+  rpc                  [PASS] [CONFIRMED] RPC responsive (1 ms)
+  eventgraph_parents   [PASS] [CONFIRMED] 410 events, 387 non-null parent references, all parents resolved
+  eventgraph_rotation  [PASS] [CONFIRMED] 24 consecutive hourly rotation timestamps present through the current rotation
+  eventgraph_epoch     [PASS] [CONFIRMED] 24 genesis timestamps aligned to the canonical DarkIRC hourly epoch
+  eventgraph_current   [PASS] [CONFIRMED] latest genesis matches canonical current rotation 1786734000000
+  eventgraph_genesis   [PASS] [CONFIRMED] 24 rotating genesis IDs match the canonical DarkIRC genesis identity
 
 No obvious issues detected.
 
-Summary: 10 passed, 0 failed, 0 unknown
+Summary: 13 passed, 0 failed, 0 unknown
 ```
 
 The diagnostic currently checks:
 
+* consensus block target
 * chain position and last confirmed block
+* confirmed chain-tip hash
+* chain linkage to the previous block
 * best fork position
 * observed confirmation depth
 * connected peers
@@ -156,7 +162,7 @@ A useful diagnostic property is parent closure: every non-null parent reference 
 For a healthy live snapshot:
 
 ```text
-eventgraph_parents: OK [CONFIRMED] 346 events, 324 non-null parent references, all parents resolved
+  eventgraph_parents [PASS] [CONFIRMED] 410 events, 387 non-null parent references, all parents resolved
 ```
 
 The tool intentionally does not treat event count or layer density as a health invariant. EventGraph state changes naturally as DAGs rotate and old history is pruned.
@@ -164,7 +170,7 @@ The tool intentionally does not treat event count or layer density as a health i
 The rotation check looks for consecutive hourly genesis timestamps in the current rolling window:
 
 ```text
-eventgraph_rotation: OK [CONFIRMED] 24 consecutive hourly rotation timestamps present
+  eventgraph_rotation [PASS] [CONFIRMED] 24 consecutive hourly rotation timestamps present through the current rotation
 ```
 
 This is intended to catch a missing rotation period without requiring the developer to manually inspect the raw EventGraph response.
@@ -174,7 +180,7 @@ The epoch check verifies that layer-0 genesis timestamps are aligned to the cano
 For a healthy live snapshot:
 
 ```text
-eventgraph_epoch: OK [CONFIRMED] 25 genesis timestamps aligned to the canonical DarkIRC hourly epoch
+  eventgraph_epoch [PASS] [CONFIRMED] 24 genesis timestamps aligned to the canonical DarkIRC hourly epoch
 ```
 
 The current-rotation check compares the latest layer-0 genesis timestamp in the snapshot against the rotation boundary implied by the current wall-clock time.
@@ -182,7 +188,7 @@ The current-rotation check compares the latest layer-0 genesis timestamp in the 
 For a healthy live snapshot:
 
 ```text
-eventgraph_current: OK [CONFIRMED] latest genesis matches canonical current rotation 1786554000000
+  eventgraph_current [PASS] [CONFIRMED] latest genesis matches canonical current rotation 1786734000000
 ```
 
 The genesis-identity check independently reconstructs the expected EventGraph genesis ID from the canonical DarkIRC genesis construction and compares it with the IDs returned by the node.
@@ -190,7 +196,7 @@ The genesis-identity check independently reconstructs the expected EventGraph ge
 For a healthy live snapshot:
 
 ```text
-eventgraph_genesis: OK [CONFIRMED] 25 rotating genesis IDs match the canonical DarkIRC genesis identity
+  eventgraph_genesis [PASS] [CONFIRMED] 24 rotating genesis IDs match the canonical DarkIRC genesis identity
 ```
 
 Together with the epoch check, this verifies not only that genesis timestamps are correctly aligned, but that the corresponding EventGraph IDs are consistent with the canonical DarkIRC identity construction.
@@ -207,20 +213,38 @@ Together, these checks distinguish between different kinds of EventGraph problem
 
 All diagnostic results can also be emitted as structured JSON:
 
-```text
 $ ./target/debug/darkfi-inspect --json diagnose
 
+```json
 {
   "checks": [
     {
       "confidence": "Confirmed",
-      "message": "last confirmed block: 44559 (6a040708a5a6e30d24170613e928241e98262b9fd6ad8c9ab889a367f4f6a09c)",
+      "message": "consensus block target: 120",
+      "name": "block_target",
+      "state": "Pass"
+    },
+    {
+      "confidence": "Confirmed",
+      "message": "last confirmed block: ...",
       "name": "chain",
       "state": "Pass"
     },
     {
       "confidence": "Confirmed",
-      "message": "best fork next height: 44565",
+      "message": "last confirmed block ... matches fetched block hash",
+      "name": "chain_tip",
+      "state": "Pass"
+    },
+    {
+      "confidence": "Confirmed",
+      "message": "previous hash matches block ...",
+      "name": "chain_linkage",
+      "state": "Pass"
+    },
+    {
+      "confidence": "Confirmed",
+      "message": "best fork next height: ...",
       "name": "best_fork",
       "state": "Pass"
     },
@@ -232,43 +256,43 @@ $ ./target/debug/darkfi-inspect --json diagnose
     },
     {
       "confidence": "Confirmed",
-      "message": "3 peer(s) connected",
+      "message": "... peer(s) connected",
       "name": "peers",
       "state": "Pass"
     },
     {
       "confidence": "Confirmed",
-      "message": "RPC responsive (3 ms)",
+      "message": "RPC responsive (... ms)",
       "name": "rpc",
       "state": "Pass"
     },
     {
       "confidence": "Confirmed",
-      "message": "346 events, 324 non-null parent references, all parents resolved",
+      "message": "... events, ... non-null parent references, all parents resolved",
       "name": "eventgraph_parents",
       "state": "Pass"
     },
     {
       "confidence": "Confirmed",
-      "message": "24 consecutive hourly rotation timestamps present",
+      "message": "24 consecutive hourly rotation timestamps present through the current rotation",
       "name": "eventgraph_rotation",
       "state": "Pass"
     },
     {
       "confidence": "Confirmed",
-      "message": "25 genesis timestamps aligned to the canonical DarkIRC hourly epoch",
+      "message": "... genesis timestamps aligned to the canonical DarkIRC hourly epoch",
       "name": "eventgraph_epoch",
       "state": "Pass"
     },
     {
       "confidence": "Confirmed",
-      "message": "latest genesis matches canonical current rotation 1786554000000",
+      "message": "latest genesis matches canonical current rotation ...",
       "name": "eventgraph_current",
       "state": "Pass"
     },
     {
       "confidence": "Confirmed",
-      "message": "25 rotating genesis IDs match the canonical DarkIRC genesis identity",
+      "message": "... rotating genesis IDs match the canonical DarkIRC genesis identity",
       "name": "eventgraph_genesis",
       "state": "Pass"
     }
@@ -277,7 +301,7 @@ $ ./target/debug/darkfi-inspect --json diagnose
   "findings": [],
   "summary": {
     "failed": 0,
-    "passed": 10,
+    "passed": 13,
     "unknown": 0
   }
 }
