@@ -248,6 +248,38 @@ mod tests {
     }
 
     #[test]
+    fn failed_chain_checks_produce_findings() {
+        let checks = [
+            (
+                "block_target",
+                "invalid consensus block target",
+                "consensus block target",
+            ),
+            (
+                "chain_tip",
+                "fetched block hash does not match",
+                "confirmed chain tip",
+            ),
+            (
+                "chain_linkage",
+                "previous hash does not match",
+                "blockchain chain linkage",
+            ),
+        ];
+
+        for (name, message, expected_area) in checks {
+            let check = CheckResult::confirmed_fail(name, message);
+            let finding = finding_for(&check);
+
+            assert!(finding.is_some(), "expected finding for {name}");
+            assert!(
+                finding.unwrap().contains(expected_area),
+                "finding for {name} did not contain expected area"
+            );
+        }
+    }
+
+    #[test]
     fn failed_eventgraph_epoch_produces_finding() {
         let check = CheckResult::confirmed_fail(
             "eventgraph_epoch",
