@@ -9,7 +9,7 @@ pub enum CheckState {
     Unknown,
 }
 
-// Confidence level for a diagnostic finding — how sure are we that this
+// Confidence level for a diagnostic check result — how sure are we that this
 // check's verdict is correct? Mirrors the original Diagnose-layer design
 // from the project's founding scope, pulled forward here so Inspect's
 // checks (and later, Diagnose's own checks) all report through one
@@ -20,9 +20,6 @@ pub enum Confidence {
     Confirmed,
     High,
     Medium,
-    Low,
-    /// The check couldn't run at all (e.g. couldn't fetch data needed
-    /// to compare) — this is NOT "failed", it's "we don't know".
     Unknown,
 }
 
@@ -32,7 +29,6 @@ impl std::fmt::Display for Confidence {
             Confidence::Confirmed => "CONFIRMED",
             Confidence::High => "HIGH",
             Confidence::Medium => "MEDIUM",
-            Confidence::Low => "LOW",
             Confidence::Unknown => "UNKNOWN",
         };
         write!(f, "{s}")
@@ -258,7 +254,11 @@ mod tests {
         let finding = finding_for(&check);
 
         assert!(finding.is_some());
-        assert!(finding.unwrap().contains("DarkIRC/EventGraph epoch alignment"));
+        assert!(
+            finding
+                .unwrap()
+                .contains("DarkIRC/EventGraph epoch alignment")
+        );
     }
 
     #[test]
@@ -271,20 +271,19 @@ mod tests {
         let finding = finding_for(&check);
 
         assert!(finding.is_some());
-        assert!(finding.unwrap().contains("DarkIRC/EventGraph current rotation"));
+        assert!(
+            finding
+                .unwrap()
+                .contains("DarkIRC/EventGraph current rotation")
+        );
     }
 
     #[test]
     fn unknown_eventgraph_checks_produce_findings() {
-        let epoch = CheckResult::unknown(
-            "eventgraph_epoch",
-            "no layer-0 genesis timestamps found",
-        );
+        let epoch = CheckResult::unknown("eventgraph_epoch", "no layer-0 genesis timestamps found");
 
-        let current = CheckResult::unknown(
-            "eventgraph_current",
-            "no layer-0 genesis timestamps found",
-        );
+        let current =
+            CheckResult::unknown("eventgraph_current", "no layer-0 genesis timestamps found");
 
         assert!(finding_for(&epoch).is_some());
         assert!(finding_for(&current).is_some());
@@ -300,23 +299,24 @@ mod tests {
         let finding = finding_for(&check);
 
         assert!(finding.is_some());
-        assert!(finding
-        .unwrap()
-        .contains("DarkIRC/EventGraph genesis identity"));
+        assert!(
+            finding
+                .unwrap()
+                .contains("DarkIRC/EventGraph genesis identity")
+        );
     }
 
     #[test]
     fn unknown_eventgraph_genesis_produces_finding() {
-        let check = CheckResult::unknown(
-            "eventgraph_genesis",
-            "no layer-0 genesis events found",
-        );
+        let check = CheckResult::unknown("eventgraph_genesis", "no layer-0 genesis events found");
 
         let finding = finding_for(&check);
 
         assert!(finding.is_some());
-        assert!(finding
-        .unwrap()
-        .contains("DarkIRC/EventGraph genesis identity"));
+        assert!(
+            finding
+                .unwrap()
+                .contains("DarkIRC/EventGraph genesis identity")
+        );
     }
 }

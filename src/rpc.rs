@@ -164,15 +164,6 @@ pub async fn get_eventgraph_info(endpoint: &str) -> anyhow::Result<Value> {
     Ok(result)
 }
 
-// Fetches darkfid's currently configured block target time (seconds),
-// used as the baseline for judging whether a real timestamp gap looks
-// plausible or not.
-pub async fn get_block_target(endpoint: &str) -> anyhow::Result<u64> {
-    let result = call(endpoint, "blockchain.block_target", serde_json::json!([])).await?;
-    let target = serde_json::from_value(result)?;
-    Ok(target)
-}
-
 // For subscribe_proposals: payload is Proposal { hash, block: BlockInfo },
 // NOT a raw BlockInfo — confirmed via src/validator/consensus.rs.
 async fn decode_proposal_notification(line: &str) -> String {

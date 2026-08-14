@@ -7,10 +7,10 @@ use diagnose::{
 };
 
 use clap::{Parser, Subcommand};
+use darkfi_serial::serialize;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
-use darkfi_serial::serialize;
 
 // The main RPC port and management RPC port, as fixed constants for now.
 // Later these become configurable (network selection, custom endpoint).
@@ -483,9 +483,97 @@ fn check_chain_linkage(
         ),
     }
 }
+// DarkFi consensus rules for validating block timestamps.
+const BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW: usize = 60;
+const BLOCK_FUTURE_TIME_LIMIT: u64 = 60 * 60 * 2;
 
-// Check whether the time gap between this block and its predecessor is
-// plausible relative to DarkFi's current block target.
+fn median_u64(mut values: Vec<u64>) -> u64 {
+    values.sort_unstable();
+    let n = values.len() / 2;
+
+    if values.len().is_multiple_of(2) {
+        (values[n - 1] / 2)
+        + (values[n] / 2)
+        + ((values[n - 1] % 2) + (values[n] % 2)) / 2
+    } else {
+        values[n]
+    }
+}
+
+fn evaluate_timestamp_sanity(
+    height: u32,
+    timestamp: u64,
+    genesis_timestamp: u64,
+    previous_timestamps: &[u64],
+    now: u64,
+) -> CheckResult {
+    if height == 0 {
+        return CheckResult::unknown("timestamp_sanity", "N/A — genesis block has no predecessor");
+    }
+
+    if timestamp <= genesis_timestamp {
+        return CheckResult::new(
+            "timestamp_sanity",
+            CheckState::Fail,
+            Confidence::High,
+            &format!(
+                "timestamp {} is not after genesis timestamp {}",
+                timestamp, genesis_timestamp
+            ),
+        );
+    }
+
+    let upper_bound = now.saturating_add(BLOCK_FUTURE_TIME_LIMIT);
+
+    if timestamp > upper_bound {
+        return CheckResult::new(
+            "timestamp_sanity",
+            CheckState::Fail,
+            Confidence::High,
+            &format!(
+                "timestamp {} is more than 2 hours ahead of local time",
+                timestamp
+            ),
+        );
+    }
+
+    if previous_timestamps.len() < BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW {
+        return CheckResult::new(
+            "timestamp_sanity",
+            CheckState::Pass,
+            Confidence::Confirmed,
+            &format!(
+                "timestamp satisfies DarkFi rules; {} prior timestamp(s), median rule not yet active",
+                     previous_timestamps.len()
+            ),
+        );
+    }
+
+    let median = median_u64(previous_timestamps.to_vec());
+
+    if timestamp < median {
+        return CheckResult::new(
+            "timestamp_sanity",
+            CheckState::Fail,
+            Confidence::High,
+            &format!(
+                "timestamp {} is below the median of the previous {} timestamps ({})",
+                     timestamp, BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW, median
+            ),
+        );
+    }
+
+    CheckResult::new(
+        "timestamp_sanity",
+        CheckState::Pass,
+        Confidence::Confirmed,
+        &format!(
+            "timestamp satisfies DarkFi rules; previous {}-block median: {}",
+            BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW, median
+        ),
+    )
+}
+
 async fn check_timestamp_sanity(
     height: u32,
     block: &darkfi::blockchain::BlockInfo,
@@ -502,41 +590,58 @@ async fn check_timestamp_sanity(
         );
     };
 
-    let gap = block.header.timestamp.inner() as i64 - prev.header.timestamp.inner() as i64;
+    let genesis = match rpc::get_block(RPC_ENDPOINT, 0).await {
+        Ok(block) => block,
+        Err(e) => {
+            return CheckResult::unknown(
+                "timestamp_sanity",
+                &format!("could not fetch genesis block: {e}"),
+            );
+        }
+    };
 
-    let target = rpc::get_block_target(RPC_ENDPOINT).await.unwrap_or(120);
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(_) => {
+            return CheckResult::unknown(
+                "timestamp_sanity",
+                "system clock is before the Unix epoch",
+            );
+        }
+    };
 
-    if gap < 0 {
-        CheckResult::new(
-            "timestamp_sanity",
-            CheckState::Fail,
-            Confidence::High,
-            &format!(
-                "timestamp is BEFORE block {} — possible clock drift or reorg",
-                height - 1
-            ),
-        )
-    } else if gap as u64 > target * 20 {
-        CheckResult::new(
-            "timestamp_sanity",
-            CheckState::Fail,
-            Confidence::Medium,
-            &format!(
-                "{gap}s gap since block {} is unusually large (target: {target}s)",
-                height - 1
-            ),
-        )
+    let mut previous_timestamps = Vec::new();
+
+    if height >= BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW as u32 {
+        let start = height - BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW as u32;
+
+        for block_height in start..height - 1 {
+            match rpc::get_block(RPC_ENDPOINT, block_height).await {
+                Ok(previous) => previous_timestamps.push(previous.header.timestamp.inner()),
+                Err(e) => {
+                    return CheckResult::unknown(
+                        "timestamp_sanity",
+                        &format!(
+                            "could not fetch block {} for timestamp median: {e}",
+                            block_height
+                        ),
+                    );
+                }
+            }
+        }
+
+        previous_timestamps.push(prev.header.timestamp.inner());
     } else {
-        CheckResult::new(
-            "timestamp_sanity",
-            CheckState::Pass,
-            Confidence::Medium,
-            &format!(
-                "{gap}s since block {} — within plausible range (target: {target}s)",
-                height - 1
-            ),
-        )
+        previous_timestamps.push(prev.header.timestamp.inner());
     }
+
+    evaluate_timestamp_sanity(
+        height,
+        block.header.timestamp.inner(),
+                              genesis.header.timestamp.inner(),
+                              &previous_timestamps,
+                              now,
+    )
 }
 
 fn check_confirmation_depth(last_confirmed_height: u32, best_fork_next_height: u32) -> CheckResult {
@@ -586,14 +691,18 @@ fn check_eventgraph_parent_closure(info: &Value) -> CheckResult {
     let event_count = dag.len();
     let mut parent_refs = 0usize;
     let mut missing_parents = Vec::new();
+    let mut malformed_events = 0usize;
+    let mut malformed_parents = 0usize;
 
     for event in dag.values() {
         let Some(parents) = event.get("parents").and_then(Value::as_array) else {
+            malformed_events += 1;
             continue;
         };
 
         for parent in parents {
             let Some(parent_id) = parent.as_str() else {
+                malformed_parents += 1;
                 continue;
             };
 
@@ -607,6 +716,16 @@ fn check_eventgraph_parent_closure(info: &Value) -> CheckResult {
                 missing_parents.push(parent_id.to_string());
             }
         }
+    }
+
+    if malformed_events > 0 || malformed_parents > 0 {
+        return CheckResult::unknown(
+            "eventgraph_parents",
+            &format!(
+                "{} event(s) had missing/invalid parents data, {} reference(s) had invalid IDs",
+                malformed_events, malformed_parents
+            ),
+        );
     }
 
     if missing_parents.is_empty() {
@@ -658,9 +777,9 @@ fn canonical_eventgraph_genesis_id(timestamp: u64) -> String {
 
 fn check_eventgraph_genesis(info: &Value) -> CheckResult {
     let Some(dag) = info
-    .get("eventgraph_info")
-    .and_then(|v| v.get("dag"))
-    .and_then(Value::as_object)
+        .get("eventgraph_info")
+        .and_then(|v| v.get("dag"))
+        .and_then(Value::as_object)
     else {
         return CheckResult::unknown(
             "eventgraph_genesis",
@@ -694,10 +813,7 @@ fn check_eventgraph_genesis(info: &Value) -> CheckResult {
     }
 
     if genesis_count == 0 {
-        return CheckResult::unknown(
-            "eventgraph_genesis",
-            "no layer-0 genesis events found",
-        );
+        return CheckResult::unknown("eventgraph_genesis", "no layer-0 genesis events found");
     }
 
     if mismatches.is_empty() {
@@ -715,10 +831,60 @@ fn check_eventgraph_genesis(info: &Value) -> CheckResult {
             Confidence::Confirmed,
             &format!(
                 "{} of {} genesis ID(s) do not match the canonical DarkIRC genesis identity",
-                     mismatches.len(),
-                     genesis_count
+                mismatches.len(),
+                genesis_count
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod timestamp_sanity_tests {
+    use super::*;
+
+    #[test]
+    fn timestamp_fails_before_genesis() {
+        let result = evaluate_timestamp_sanity(1, 99, 100, &[100], 1_000);
+
+        assert!(matches!(result.state, CheckState::Fail));
+        assert!(matches!(result.confidence, Confidence::High));
+    }
+
+    #[test]
+    fn timestamp_fails_when_too_far_in_future() {
+        let result = evaluate_timestamp_sanity(1, 10_000, 100, &[100], 1_000);
+
+        assert!(matches!(result.state, CheckState::Fail));
+        assert!(result.message.contains("2 hours"));
+    }
+
+    #[test]
+    fn timestamp_passes_before_median_rule_is_active() {
+        let result = evaluate_timestamp_sanity(10, 1_000, 100, &[900], 1_000);
+
+        assert!(matches!(result.state, CheckState::Pass));
+        assert!(matches!(result.confidence, Confidence::Confirmed));
+        assert!(result.message.contains("median rule not yet active"));
+    }
+
+    #[test]
+    fn timestamp_fails_below_previous_median() {
+        let previous = vec![100; BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW];
+
+        let result = evaluate_timestamp_sanity(60, 99, 50, &previous, 1_000);
+
+        assert!(matches!(result.state, CheckState::Fail));
+        assert!(result.message.contains("median"));
+    }
+
+    #[test]
+    fn timestamp_passes_at_previous_median() {
+        let previous = vec![100; BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW];
+
+        let result = evaluate_timestamp_sanity(60, 100, 50, &previous, 1_000);
+
+        assert!(matches!(result.state, CheckState::Pass));
+        assert!(matches!(result.confidence, Confidence::Confirmed));
     }
 }
 
@@ -735,7 +901,78 @@ mod eventgraph_genesis_tests {
     }
 }
 
+#[cfg(test)]
+mod eventgraph_parent_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parent_closure_passes_when_all_parents_resolve() {
+        let info = json!({
+            "eventgraph_info": {
+                "dag": {
+                    "event-a": {
+                        "parents": [
+                            "0000000000000000000000000000000000000000000000000000000000000000"
+                        ]
+                    },
+                    "event-b": {
+                        "parents": ["event-a"]
+                    }
+                }
+            }
+        });
+
+        let result = check_eventgraph_parent_closure(&info);
+
+        assert!(matches!(result.state, CheckState::Pass));
+        assert!(matches!(result.confidence, Confidence::Confirmed));
+    }
+
+    #[test]
+    fn parent_closure_fails_when_parent_is_missing() {
+        let info = json!({
+            "eventgraph_info": {
+                "dag": {
+                    "event-a": {
+                        "parents": ["missing-parent"]
+                    }
+                }
+            }
+        });
+
+        let result = check_eventgraph_parent_closure(&info);
+
+        assert!(matches!(result.state, CheckState::Fail));
+        assert!(matches!(result.confidence, Confidence::Medium));
+        assert!(result.message.contains("missing parent"));
+    }
+
+    #[test]
+    fn parent_closure_is_unknown_when_parent_data_is_malformed() {
+        let info = json!({
+            "eventgraph_info": {
+                "dag": {
+                    "event-a": {
+                        "parents": "not-an-array"
+                    },
+                    "event-b": {
+                        "parents": [123]
+                    }
+                }
+            }
+        });
+
+        let result = check_eventgraph_parent_closure(&info);
+
+        assert!(matches!(result.state, CheckState::Unknown));
+        assert!(matches!(result.confidence, Confidence::Unknown));
+        assert!(result.message.contains("invalid"));
+    }
+}
+
 fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
+    const DARKIRC_INITIAL_GENESIS: u64 = 1_740_787_200_000;
     const HOUR_MS: u64 = 60 * 60 * 1000;
     const EXPECTED_ROTATIONS: usize = 24;
 
@@ -750,23 +987,17 @@ fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
         );
     };
 
-    let mut genesis_timestamps = Vec::new();
+    let genesis_timestamps: Vec<u64> = dag
+        .values()
+        .filter_map(|event| {
+            let layer = event.get("layer").and_then(Value::as_u64)?;
+            if layer != 0 {
+                return None;
+            }
 
-    for event in dag.values() {
-        let Some(layer) = event.get("layer").and_then(Value::as_u64) else {
-            continue;
-        };
-
-        if layer != 0 {
-            continue;
-        }
-
-        let Some(timestamp) = event.get("timestamp").and_then(Value::as_u64) else {
-            continue;
-        };
-
-        genesis_timestamps.push(timestamp);
-    }
+            event.get("timestamp").and_then(Value::as_u64)
+        })
+        .collect();
 
     if genesis_timestamps.len() < EXPECTED_ROTATIONS {
         return CheckResult::new(
@@ -781,12 +1012,28 @@ fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
         );
     }
 
-    let latest = *genesis_timestamps.iter().max().unwrap();
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as u64,
+        Err(_) => {
+            return CheckResult::unknown(
+                "eventgraph_rotation",
+                "system clock is before the Unix Epoch",
+            );
+        }
+    };
+
+    let current = if now < DARKIRC_INITIAL_GENESIS {
+        DARKIRC_INITIAL_GENESIS
+    } else {
+        let elapsed = now - DARKIRC_INITIAL_GENESIS;
+        let hours = elapsed / HOUR_MS;
+        DARKIRC_INITIAL_GENESIS + hours * HOUR_MS
+    };
 
     let mut missing = Vec::new();
 
     for offset in 0..EXPECTED_ROTATIONS {
-        let expected = latest.saturating_sub(offset as u64 * HOUR_MS);
+        let expected = current.saturating_sub(offset as u64 * HOUR_MS);
 
         if !genesis_timestamps.contains(&expected) {
             missing.push(expected);
@@ -797,7 +1044,7 @@ fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
         CheckResult::confirmed_pass(
             "eventgraph_rotation",
             &format!(
-                "{} consecutive hourly rotation timestamps present",
+                "{} consecutive hourly rotation timestamps present in the current window",
                 EXPECTED_ROTATIONS
             ),
         )
@@ -807,7 +1054,7 @@ fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
             CheckState::Fail,
             Confidence::High,
             &format!(
-                "missing {} rotation timestamp(s) in the latest {}-hour window",
+                "missing {} rotation timestamp(s) in the current {}-hour window",
                 missing.len(),
                 EXPECTED_ROTATIONS
             ),
@@ -946,19 +1193,25 @@ fn check_eventgraph_current(info: &Value) -> CheckResult {
 
     let lag_hours = (expected - latest) / HOUR_MS;
 
-    let message = if lag_hours == 0 {
-        format!(
-            "latest genesis matches canonical current rotation {}",
-            expected
-        )
-    } else {
-        format!(
+    if latest == expected {
+        return CheckResult::confirmed_pass(
+            "eventgraph_current",
+            &format!(
+                "latest genesis matches canonical current rotation {}",
+                expected
+            ),
+        );
+    }
+
+    CheckResult::new(
+        "eventgraph_current",
+        CheckState::Pass,
+        Confidence::Medium,
+        &format!(
             "latest genesis is {} rotation(s) behind canonical current rotation {}",
             lag_hours, expected
-        )
-    };
-
-    CheckResult::confirmed_pass("eventgraph_current", &message)
+        ),
+    )
 }
 
 async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
