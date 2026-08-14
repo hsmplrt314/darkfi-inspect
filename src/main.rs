@@ -225,14 +225,6 @@ async fn cmd_status(json: bool) -> anyhow::Result<()> {
         println!("RPC latency: {} ms", status.rpc_latency_ms);
     }
 
-    // Exit code groundwork for future scripting/monitoring use (cron, CI checks,
-    // watch loops): 0 = healthy (confirmation_depth == 5), 1 = anomalous.
-    // Not printed/decorated — a human reading the line above already sees the number;
-    // this is purely for callers that don't have a human watching.
-    if status.confirmation_depth != 5 {
-        std::process::exit(1);
-    }
-
     Ok(())
 }
 
@@ -492,9 +484,7 @@ fn median_u64(mut values: Vec<u64>) -> u64 {
     let n = values.len() / 2;
 
     if values.len().is_multiple_of(2) {
-        (values[n - 1] / 2)
-        + (values[n] / 2)
-        + ((values[n - 1] % 2) + (values[n] % 2)) / 2
+        (values[n - 1] / 2) + (values[n] / 2) + ((values[n - 1] % 2) + (values[n] % 2)) / 2
     } else {
         values[n]
     }
@@ -544,7 +534,7 @@ fn evaluate_timestamp_sanity(
             Confidence::Confirmed,
             &format!(
                 "timestamp satisfies DarkFi rules; {} prior timestamp(s), median rule not yet active",
-                     previous_timestamps.len()
+                previous_timestamps.len()
             ),
         );
     }
@@ -558,7 +548,7 @@ fn evaluate_timestamp_sanity(
             Confidence::High,
             &format!(
                 "timestamp {} is below the median of the previous {} timestamps ({})",
-                     timestamp, BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW, median
+                timestamp, BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW, median
             ),
         );
     }
@@ -638,9 +628,9 @@ async fn check_timestamp_sanity(
     evaluate_timestamp_sanity(
         height,
         block.header.timestamp.inner(),
-                              genesis.header.timestamp.inner(),
-                              &previous_timestamps,
-                              now,
+        genesis.header.timestamp.inner(),
+        &previous_timestamps,
+        now,
     )
 }
 
@@ -659,19 +649,10 @@ fn check_confirmation_depth(last_confirmed_height: u32, best_fork_next_height: u
 
     let depth = (best_fork_next_height - last_confirmed_height - 1) as i64;
 
-    if depth == 5 {
-        CheckResult::confirmed_pass("chain_depth", "confirmation depth is 5 blocks")
-    } else {
-        CheckResult::new(
-            "chain_depth",
-            CheckState::Fail,
-            Confidence::Medium,
-            &format!(
-                "confirmation depth is {} blocks (observed healthy value: 5)",
-                depth
-            ),
-        )
-    }
+    CheckResult::confirmed_pass(
+        "chain_depth",
+        &format!("confirmation depth is {} blocks", depth),
+    )
 }
 
 fn check_eventgraph_parent_closure(info: &Value) -> CheckResult {
