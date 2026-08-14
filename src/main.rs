@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const RPC_ENDPOINT: &str = "127.0.0.1:18345";
 const MGMT_ENDPOINT: &str = "127.0.0.1:18346";
 const DARKIRC_ENDPOINT: &str = "127.0.0.1:9605";
+const DARKIRC_INITIAL_GENESIS: u64 = 1_740_787_200_000;
 
 // This is the *specific* shape of p2p.get_info's result, matching
 // exactly what we read in src/rpc/p2p_method.rs — a list of channels
@@ -44,9 +45,9 @@ struct NodeStatus {
     last_confirmed_hash: String,
     best_fork_next_height: u32,
     // confirmation_depth: distance between best_fork_next_height and last_confirmed_height.
-    // Confirmed via live observation: DarkFi consistently confirms blocks 5 deep —
-    // this should read 5 on a healthy node. Anything else is the real anomaly to flag
-    // (stuck confirmation logic, reorg in progress, or genuine sync lag).
+    // Observed confirmation depth between the best fork tip and the last confirmed block.
+    // This is reported as an observation; the configured confirmation threshold is not
+    // exposed through the current RPC surface.
     confirmation_depth: i64,
     peers_connected: usize,
     peers_slots: usize,
@@ -784,6 +785,10 @@ fn check_eventgraph_genesis(info: &Value) -> CheckResult {
             continue;
         };
 
+        if timestamp == DARKIRC_INITIAL_GENESIS {
+            continue;
+        }
+
         genesis_count += 1;
 
         let expected_id = canonical_eventgraph_genesis_id(timestamp);
@@ -883,6 +888,90 @@ mod eventgraph_genesis_tests {
 }
 
 #[cfg(test)]
+mod eventgraph_rotation_tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn current_rotation() -> u64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        if now < DARKIRC_INITIAL_GENESIS {
+            DARKIRC_INITIAL_GENESIS
+        } else {
+            let elapsed = now - DARKIRC_INITIAL_GENESIS;
+            let hours = elapsed / (60 * 60 * 1000);
+            DARKIRC_INITIAL_GENESIS + hours * 60 * 60 * 1000
+        }
+    }
+
+    #[test]
+    fn rotation_history_ignores_static_genesis() {
+        let current = current_rotation();
+        let hour = 60 * 60 * 1000;
+
+        let info = json!({
+            "eventgraph_info": {
+                "dag": {
+                    "static": {
+                        "layer": 0,
+                        "timestamp": DARKIRC_INITIAL_GENESIS
+                    },
+                    "current": {
+                        "layer": 0,
+                        "timestamp": current
+                    },
+                    "previous": {
+                        "layer": 0,
+                        "timestamp": current - hour
+                    }
+                }
+            }
+        });
+
+        let result = check_eventgraph_rotation_window(&info);
+
+        assert!(matches!(result.state, CheckState::Pass));
+        assert!(matches!(result.confidence, Confidence::Confirmed));
+        assert!(result.message.contains("2 consecutive hourly"));
+    }
+
+    #[test]
+    fn rotation_history_does_not_require_24_dags() {
+        let current = current_rotation();
+        let hour = 60 * 60 * 1000;
+
+        let info = json!({
+            "eventgraph_info": {
+                "dag": {
+                    "current": {
+                        "layer": 0,
+                        "timestamp": current
+                    },
+                    "previous": {
+                        "layer": 0,
+                        "timestamp": current - hour
+                    },
+                    "older": {
+                        "layer": 0,
+                        "timestamp": current - (2 * hour)
+                    }
+                }
+            }
+        });
+
+        let result = check_eventgraph_rotation_window(&info);
+
+        assert!(matches!(result.state, CheckState::Pass));
+        assert!(matches!(result.confidence, Confidence::Confirmed));
+        assert!(result.message.contains("3 consecutive hourly"));
+    }
+}
+
+#[cfg(test)]
 mod eventgraph_parent_tests {
     use super::*;
     use serde_json::json;
@@ -953,9 +1042,7 @@ mod eventgraph_parent_tests {
 }
 
 fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
-    const DARKIRC_INITIAL_GENESIS: u64 = 1_740_787_200_000;
     const HOUR_MS: u64 = 60 * 60 * 1000;
-    const EXPECTED_ROTATIONS: usize = 24;
 
     let Some(dag) = info
         .get("eventgraph_info")
@@ -968,7 +1055,7 @@ fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
         );
     };
 
-    let genesis_timestamps: Vec<u64> = dag
+    let mut genesis_timestamps: Vec<u64> = dag
         .values()
         .filter_map(|event| {
             let layer = event.get("layer").and_then(Value::as_u64)?;
@@ -976,22 +1063,22 @@ fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
                 return None;
             }
 
-            event.get("timestamp").and_then(Value::as_u64)
+            let timestamp = event.get("timestamp").and_then(Value::as_u64)?;
+
+            if timestamp == DARKIRC_INITIAL_GENESIS {
+                return None;
+            }
+
+            Some(timestamp)
         })
         .collect();
 
-    if genesis_timestamps.len() < EXPECTED_ROTATIONS {
-        return CheckResult::new(
-            "eventgraph_rotation",
-            CheckState::Fail,
-            Confidence::High,
-            &format!(
-                "only {} genesis timestamps found; expected at least {} rotating DAGs",
-                genesis_timestamps.len(),
-                EXPECTED_ROTATIONS
-            ),
-        );
+    if genesis_timestamps.is_empty() {
+        return CheckResult::unknown("eventgraph_rotation", "no layer-0 genesis timestamps found");
     }
+
+    genesis_timestamps.sort_unstable();
+    genesis_timestamps.dedup();
 
     let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_millis() as u64,
@@ -1011,40 +1098,58 @@ fn check_eventgraph_rotation_window(info: &Value) -> CheckResult {
         DARKIRC_INITIAL_GENESIS + hours * HOUR_MS
     };
 
-    let mut missing = Vec::new();
-
-    for offset in 0..EXPECTED_ROTATIONS {
-        let expected = current.saturating_sub(offset as u64 * HOUR_MS);
-
-        if !genesis_timestamps.contains(&expected) {
-            missing.push(expected);
-        }
-    }
-
-    if missing.is_empty() {
-        CheckResult::confirmed_pass(
-            "eventgraph_rotation",
-            &format!(
-                "{} consecutive hourly rotation timestamps present in the current window",
-                EXPECTED_ROTATIONS
-            ),
-        )
-    } else {
-        CheckResult::new(
+    if !genesis_timestamps.contains(&current) {
+        return CheckResult::new(
             "eventgraph_rotation",
             CheckState::Fail,
             Confidence::High,
             &format!(
-                "missing {} rotation timestamp(s) in the current {}-hour window",
-                missing.len(),
-                EXPECTED_ROTATIONS
+                "current canonical rotation {} is missing from EventGraph history",
+                current
             ),
-        )
+        );
     }
+
+    for &timestamp in &genesis_timestamps {
+        if timestamp < DARKIRC_INITIAL_GENESIS
+            || (timestamp - DARKIRC_INITIAL_GENESIS) % HOUR_MS != 0
+        {
+            return CheckResult::new(
+                "eventgraph_rotation",
+                CheckState::Fail,
+                Confidence::High,
+                &format!(
+                    "genesis timestamp {} is outside the canonical hourly rotation epoch",
+                    timestamp
+                ),
+            );
+        }
+    }
+
+    for window in genesis_timestamps.windows(2) {
+        if window[1] - window[0] != HOUR_MS {
+            return CheckResult::new(
+                "eventgraph_rotation",
+                CheckState::Fail,
+                Confidence::High,
+                &format!(
+                    "rotation history has a gap between {} and {}",
+                    window[0], window[1]
+                ),
+            );
+        }
+    }
+
+    CheckResult::confirmed_pass(
+        "eventgraph_rotation",
+        &format!(
+            "{} consecutive hourly rotation timestamps present through the current rotation",
+            genesis_timestamps.len()
+        ),
+    )
 }
 
 fn check_eventgraph_epoch(info: &Value) -> CheckResult {
-    const DARKIRC_INITIAL_GENESIS: u64 = 1_740_787_200_000;
     const HOUR_MS: u64 = 60 * 60 * 1000;
 
     let Some(dag) = info
@@ -1072,6 +1177,10 @@ fn check_eventgraph_epoch(info: &Value) -> CheckResult {
         let Some(timestamp) = event.get("timestamp").and_then(Value::as_u64) else {
             continue;
         };
+
+        if timestamp == DARKIRC_INITIAL_GENESIS {
+            continue;
+        }
 
         genesis_timestamps.push(timestamp);
     }
@@ -1113,7 +1222,6 @@ fn check_eventgraph_epoch(info: &Value) -> CheckResult {
 }
 
 fn check_eventgraph_current(info: &Value) -> CheckResult {
-    const DARKIRC_INITIAL_GENESIS: u64 = 1_740_787_200_000;
     const HOUR_MS: u64 = 60 * 60 * 1000;
 
     let Some(dag) = info
