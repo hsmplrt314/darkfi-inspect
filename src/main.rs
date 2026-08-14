@@ -268,17 +268,11 @@ fn check_block_height(requested_height: u32, block: &darkfi::blockchain::BlockIn
     }
 }
 
-async fn check_last_confirmed_block(height: u32, expected_hash: &str) -> CheckResult {
-    let block = match rpc::get_block(RPC_ENDPOINT, height).await {
-        Ok(block) => block,
-        Err(e) => {
-            return CheckResult::confirmed_fail(
-                "chain_tip",
-                &format!("failed fetching last confirmed block {height}: {e}"),
-            );
-        }
-    };
-
+fn check_last_confirmed_block(
+    height: u32,
+    expected_hash: &str,
+    block: &darkfi::blockchain::BlockInfo,
+) -> CheckResult {
     let actual_height = block.header.height;
     let actual_hash = block.header.hash().to_string();
 
@@ -306,6 +300,27 @@ async fn check_last_confirmed_block(height: u32, expected_hash: &str) -> CheckRe
         "chain_tip",
         &format!("last confirmed block {} matches fetched block hash", height),
     )
+}
+
+async fn check_last_confirmed_linkage(
+    height: u32,
+    block: &darkfi::blockchain::BlockInfo,
+) -> CheckResult {
+    if height == 0 {
+        return CheckResult::unknown("chain_linkage", "N/A - genesis block has no predecessor");
+    }
+
+    let prev_block = match rpc::get_block(RPC_ENDPOINT, height - 1).await {
+        Ok(block) => block,
+        Err(e) => {
+            return CheckResult::unknown(
+                "chain_linkage",
+                &format!("could not fetch block {} to verify: {e}", height - 1),
+            );
+        }
+    };
+
+    check_chain_linkage(height, block, Some(&prev_block))
 }
 
 fn check_tx_hash(requested_hash: &str, tx: &darkfi::tx::Transaction) -> CheckResult {
@@ -1422,7 +1437,22 @@ async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
                     &format!("last confirmed block: {} ({})", height, short_hash),
                 ));
 
-                checks.push(check_last_confirmed_block(height, &hash).await);
+                match rpc::get_block(RPC_ENDPOINT, height).await {
+                    Ok(block) => {
+                        checks.push(check_last_confirmed_block(height, &hash, &block));
+                        checks.push(check_last_confirmed_linkage(height, &block).await);
+                    }
+                    Err(e) => {
+                        checks.push(CheckResult::confirmed_fail(
+                            "chain_tip",
+                            &format!("failed fetching last confirmed block {height}: {e}"),
+                        ));
+                        checks.push(CheckResult::unknown(
+                            "chain_linkage",
+                            &format!("could not fetch block {height} to verify"),
+                        ));
+                    }
+                }
 
                 Some((height, hash))
             }
