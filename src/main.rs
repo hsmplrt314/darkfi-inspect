@@ -268,6 +268,46 @@ fn check_block_height(requested_height: u32, block: &darkfi::blockchain::BlockIn
     }
 }
 
+async fn check_last_confirmed_block(height: u32, expected_hash: &str) -> CheckResult {
+    let block = match rpc::get_block(RPC_ENDPOINT, height).await {
+        Ok(block) => block,
+        Err(e) => {
+            return CheckResult::confirmed_fail(
+                "chain_tip",
+                &format!("failed fetching last confirmed block {height}: {e}"),
+            );
+        }
+    };
+
+    let actual_height = block.header.height;
+    let actual_hash = block.header.hash().to_string();
+
+    if actual_height != height {
+        return CheckResult::confirmed_fail(
+            "chain_tip",
+            &format!(
+                "fetched block reports height {}, expected {}",
+                actual_height, height
+            ),
+        );
+    }
+
+    if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+        return CheckResult::confirmed_fail(
+            "chain_tip",
+            &format!(
+                "fetched block hash {} does not match last confirmed hash {}",
+                actual_hash, expected_hash
+            ),
+        );
+    }
+
+    CheckResult::confirmed_pass(
+        "chain_tip",
+        &format!("last confirmed block {} matches fetched block hash", height),
+    )
+}
+
 fn check_tx_hash(requested_hash: &str, tx: &darkfi::tx::Transaction) -> CheckResult {
     let actual_hash = tx.hash().to_string();
 
@@ -1381,6 +1421,9 @@ async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
                     "chain",
                     &format!("last confirmed block: {} ({})", height, short_hash),
                 ));
+
+                checks.push(check_last_confirmed_block(height, &hash).await);
+
                 Some((height, hash))
             }
             Err(e) => {
