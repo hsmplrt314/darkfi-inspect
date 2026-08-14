@@ -1324,7 +1324,49 @@ async fn cmd_diagnose(json: bool) -> anyhow::Result<()> {
 
     let p2p_reply = rpc::call(MGMT_ENDPOINT, "p2p.get_info", Value::Array(vec![])).await;
 
+    let block_target_reply = rpc::call(
+        RPC_ENDPOINT,
+        "blockchain.block_target",
+        Value::Array(vec![]),
+    )
+    .await;
+
     let mut checks = Vec::new();
+
+    match block_target_reply {
+        Ok(reply) => match serde_json::from_value::<f64>(reply) {
+            Ok(block_target) if block_target.is_finite() && block_target > 0.0 => {
+                checks.push(CheckResult::confirmed_pass(
+                    "block_target",
+                    &format!("consensus block target: {block_target}"),
+                ));
+            }
+            Ok(block_target) => {
+                checks.push(CheckResult::new(
+                    "block_target",
+                    CheckState::Fail,
+                    Confidence::High,
+                    &format!("invalid consensus block target: {block_target}"),
+                ));
+            }
+            Err(e) => {
+                checks.push(CheckResult::new(
+                    "block_target",
+                    CheckState::Fail,
+                    Confidence::High,
+                    &format!("invalid blockchain.block_target response: {e}"),
+                ));
+            }
+        },
+        Err(e) => {
+            checks.push(CheckResult::new(
+                "block_target",
+                CheckState::Fail,
+                Confidence::High,
+                &format!("blockchain.block_target RPC failed: {e}"),
+            ));
+        }
+    }
 
     let last_confirmed = match lcb_reply {
         Ok(reply) => match serde_json::from_value::<(u32, String)>(reply) {
