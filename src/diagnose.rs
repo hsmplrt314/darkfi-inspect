@@ -169,20 +169,25 @@ impl DiagnosticVerdict {
 /// Turn failed/unknown checks into a useful next place to investigate.
 pub fn finding_for(check: &CheckResult) -> Option<String> {
     let area = match check.name.as_str() {
-        "chain" => "blockchain/chain state",
         "best_fork" => "consensus/fork state",
         "block_target" => "consensus block target",
+        "chain" => "blockchain/chain state",
+        "call_tree" => "transaction call-tree integrity",
+        "calls_proofs" => "transaction proof alignment",
+        "calls_signatures" => "transaction signature alignment",
         "chain_tip" => "confirmed chain tip",
         "chain_linkage" => "blockchain chain linkage",
         "chain_depth" => "consensus/synchronization",
-        "peers" => "P2P connectivity",
-        "rpc" => "RPC responsiveness",
         "eventgraph_parents" => "DarkIRC/EventGraph synchronization",
         "eventgraph_rotation" => "DarkIRC/EventGraph rotation history",
         "eventgraph_epoch" => "DarkIRC/EventGraph epoch alignment",
         "eventgraph_current" => "DarkIRC/EventGraph current rotation",
         "eventgraph_genesis" => "DarkIRC/EventGraph genesis identity",
         "eventgraph" => "DarkIRC EventGraph RPC",
+        "peers" => "P2P connectivity",
+        "rpc" => "RPC responsiveness",
+        "tx_hash" => "transaction identity",
+
         _ => return None,
     };
 
@@ -196,6 +201,28 @@ pub fn finding_for(check: &CheckResult) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_tx_checks_produce_findings() {
+        let checks = [
+            ("tx_hash", "transaction identity"),
+            ("call_tree", "transaction call-tree integrity"),
+            ("calls_proofs", "transaction proof alignment"),
+            ("calls_signatures", "transaction signature alignment"),
+        ];
+
+        for (name, expected_area) in checks {
+            let check = CheckResult::confirmed_fail(name, "test failure");
+
+            let finding = finding_for(&check);
+
+            assert!(finding.is_some(), "expected finding for {name}");
+            assert!(
+                finding.unwrap().contains(expected_area),
+                "finding for {name} did not contain expected area"
+            );
+        }
+    }
 
     #[test]
     fn verdict_is_healthy_when_all_checks_pass() {

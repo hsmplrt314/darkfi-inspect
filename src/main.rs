@@ -378,6 +378,26 @@ fn check_tx_signature_alignment(tx: &darkfi::tx::Transaction) -> CheckResult {
     }
 }
 
+fn check_tx_call_tree_integrity(tx: &darkfi::tx::Transaction) -> CheckResult {
+    match darkfi_sdk::dark_tree::dark_forest_leaf_vec_integrity_check(
+        &tx.calls,
+        Some(darkfi::tx::MIN_TX_CALLS),
+        Some(darkfi::tx::MAX_TX_CALLS),
+    ) {
+        Ok(()) => CheckResult::confirmed_pass(
+            "call_tree",
+            &format!(
+                "transaction call forest is structurally valid ({} call(s))",
+                tx.calls.len()
+            ),
+        ),
+        Err(e) => CheckResult::confirmed_fail(
+            "call_tree",
+            &format!("transaction call forest is invalid: {e}"),
+        ),
+    }
+}
+
 async fn cmd_inspect(target: InspectTarget, json: bool) -> anyhow::Result<()> {
     match target {
         InspectTarget::Block { height } => {
@@ -433,6 +453,7 @@ async fn cmd_inspect(target: InspectTarget, json: bool) -> anyhow::Result<()> {
 
             let checks = vec![
                 check_tx_hash(&hash, &tx),
+                check_tx_call_tree_integrity(&tx),
                 check_tx_proof_alignment(&tx),
                 check_tx_signature_alignment(&tx),
             ];
@@ -1023,6 +1044,45 @@ mod eventgraph_rotation_tests {
         assert!(matches!(result.state, CheckState::Pass));
         assert!(matches!(result.confidence, Confidence::Confirmed));
         assert!(result.message.contains("3 consecutive hourly"));
+    }
+}
+
+#[cfg(test)]
+mod tx_inspection_tests {
+    use super::*;
+
+    #[test]
+    fn tx_call_tree_rejects_empty_transaction() {
+        let tx = darkfi::tx::Transaction::default();
+
+        let result = check_tx_call_tree_integrity(&tx);
+
+        assert!(matches!(result.state, CheckState::Fail));
+        assert!(matches!(result.confidence, Confidence::Confirmed));
+        assert!(result.message.contains("call forest is invalid"));
+    }
+
+    #[test]
+    fn tx_call_tree_accepts_single_root_call() {
+        let contract_id = darkfi_sdk::crypto::contract_id::ContractId::from_bytes([0; 32]).unwrap();
+
+        let tx = darkfi::tx::Transaction {
+            calls: vec![darkfi_sdk::dark_tree::DarkLeaf {
+                data: darkfi_sdk::tx::ContractCall {
+                    contract_id,
+                    data: vec![1],
+                },
+                parent_index: None,
+                children_indexes: vec![],
+            }],
+            proofs: vec![vec![]],
+            signatures: vec![vec![]],
+        };
+
+        let result = check_tx_call_tree_integrity(&tx);
+
+        assert!(matches!(result.state, CheckState::Pass));
+        assert!(matches!(result.confidence, Confidence::Confirmed));
     }
 }
 

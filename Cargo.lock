@@ -983,6 +983,7 @@ dependencies = [
  "blake3",
  "clap",
  "darkfi",
+ "darkfi-sdk",
  "darkfi-serial",
  "serde",
  "serde_json",

@@ -12,6 +12,7 @@ serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["full"] }
 darkfi = { path = "../darkfi", features = ["blockchain", "util", "validator"] }
 darkfi-serial = { path = "../darkfi/src/serial"}
+darkfi-sdk = { path = "../darkfi/src/sdk"}
 
 [patch.crates-io]
 halo2_proofs = { git = "https://github.com/parazyd/halo2", branch = "v050" }
